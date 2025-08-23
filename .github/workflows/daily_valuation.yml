@@ -1,0 +1,50 @@
+name: Daily Valuation (10:00 Beijing)
+
+on:
+  schedule:
+    # 解释：GitHub 用 UTC；02:00 UTC = 北京时间 10:00
+    - cron: '0 2 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: |
+          npm ci || npm i
+          npx playwright install --with-deps
+
+      - name: Run fetch & write
+        env:
+          # Google 服务账号（放在仓库 Settings → Secrets）
+          GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+          GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
+
+          # 你的“总表”ID（放在仓库 Settings → Variables）
+          SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
+
+          # （可选）邮件通知：SMTP
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ vars.MAIL_TO }}
+          MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+
+          # 估值参数（可选）
+          ERP_TARGET: ${{ vars.ERP_TARGET }}
+          DELTA:      ${{ vars.DELTA }}
+          TZ:         Asia/Shanghai
+        run: |
+          node scripts/fetch_pe_and_write_sheet.mjs
+
