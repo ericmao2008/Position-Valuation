@@ -14,8 +14,16 @@ const CSI_HOME = 'https://www.csindex.com.cn/zh-CN/indices/index-detail/000300';
 const YZYX_DATA = 'https://youzhiyouxing.cn/data';
 const DAMODARAN_CRP = 'https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html';
 
-const ERP_TARGET = Number(process.env.ERP_TARGET ?? 0.0527);
-const DELTA      = Number(process.env.DELTA ?? 0.005);
+// —— 关键修复：对空字符串也做回退 —— //
+function numOrDefault(envValue, def) {
+  if (envValue === undefined || envValue === null) return def;
+  const v = String(envValue).trim();
+  if (v === '') return def;                 // 处理 GitHub Actions 传入的空字符串
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+const ERP_TARGET = numOrDefault(process.env.ERP_TARGET, 0.0527); // 5.27%
+const DELTA      = numOrDefault(process.env.DELTA, 0.005);       // 0.50%
 const tz         = process.env.TZ || 'Asia/Shanghai';
 
 function todayStr() {
@@ -106,7 +114,7 @@ async function getChina10Y() {
     }
   } catch {}
 
-  // B) 纯文本解析同一页面（作为轻量兜底，但仍然只来自有知有行）
+  // B) 同站点的纯文本解析（轻量兜底）
   try {
     const res = await fetch(YZYX_DATA, { headers: { 'User-Agent': 'Mozilla/5.0' }});
     if (res.ok) {
@@ -116,8 +124,7 @@ async function getChina10Y() {
     }
   } catch {}
 
-  // 若两种方式都失败，返回 null（不再使用其他网站）
-  return null;
+  return null; // 不再使用其他网站
 }
 
 // --------- 写入“总表”：每日新 tab + 数字格式 + 数据源链接 + 邮件 ---------
