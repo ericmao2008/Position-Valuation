@@ -1,0 +1,17 @@
+{
+  "name": "danjuan-pe-sheet",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "login": "node scripts/login.mjs",
+    "fetch": "node scripts/fetch_pe_and_write_sheet.mjs",
+    "playwright-install": "npx playwright install --with-deps"
+  },
+  "dependencies": {
+    "date-fns": "^3.6.0",
+    "googleapis": "^133.0.0",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^7.0.5",
+    "playwright": "^1.45.0"
+  }
+}

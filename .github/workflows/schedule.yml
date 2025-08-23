@@ -1,0 +1,50 @@
+name: Daily Danjuan PE → Google Sheet
+
+on:
+  schedule:
+    - cron: '30 1 * * *'   # 09:30 Asia/Shanghai
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: |
+          npm ci || npm i
+          npm run playwright-install
+
+      - name: Restore storage state
+        uses: actions/download-artifact@v4
+        with:
+          name: storage
+        continue-on-error: true
+
+      - name: Create storage fallback if missing
+        run: |
+          [ -f storage_state.json ] || echo '{}' > storage_state.json
+
+      - name: Run fetch
+        env:
+          GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+          GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
+          GOOGLE_FOLDER_ID: ${{ secrets.GOOGLE_FOLDER_ID }}
+          ERP_TARGET: ${{ vars.ERP_TARGET }}
+          DELTA: ${{ vars.DELTA }}
+          TZ: Asia/Shanghai
+        run: |
+          npm run fetch
+
+      - name: Save storage state (cookies) as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage
+          path: storage_state.json
