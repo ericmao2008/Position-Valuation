@@ -1,13 +1,15 @@
-name: Daily Danjuan PE → Google Sheet
+name: Daily Valuation (10:00 Beijing)
 
 on:
   schedule:
-    - cron: '30 1 * * *'   # 09:30 Asia/Shanghai
+    - cron: '0 2 * * *'   # 10:00 CST
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,35 +18,36 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install deps
-        run: |
-          npm ci || npm i
-          npm run playwright-install
+        run: npm ci || npm i
 
-      - name: Restore storage state
-        uses: actions/download-artifact@v4
-        with:
-          name: storage
-        continue-on-error: true
+      # 只有当你需要渲染兜底时才安装 Playwright 浏览器，提高首次速度
+      - name: Install Playwright Chromium (optional)
+        if: env.USE_PLAYWRIGHT == '1'
+        run: npx playwright install chromium --with-deps
 
-      - name: Create storage fallback if missing
-        run: |
-          [ -f storage_state.json ] || echo '{}' > storage_state.json
-
-      - name: Run fetch
+      - name: Run fetch & write
         env:
           GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-          GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
-          GOOGLE_FOLDER_ID: ${{ secrets.GOOGLE_FOLDER_ID }}
-          ERP_TARGET: ${{ vars.ERP_TARGET }}
-          DELTA: ${{ vars.DELTA }}
-          TZ: Asia/Shanghai
-        run: |
-          npm run fetch
+          GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
+          SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
-      - name: Save storage state (cookies) as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: storage
-          path: storage_state.json
+          # 邮件（可选）
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO:   ${{ vars.MAIL_TO }}
+          MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+
+          # 估值参数（允许留空，脚本会回落默认）
+          ERP_TARGET: ${{ vars.ERP_TARGET }}
+          DELTA:      ${{ vars.DELTA }}
+          TZ:         Asia/Shanghai
+
+          # 性能与稳定性开关
+          USE_PLAYWRIGHT: '0'     # 默认关闭兜底渲染（最快）。需要时改为 '1'
+          RF_OVERRIDE: ''         # 例如 '0.0178'，抓不到 r_f 时使用
+        run: node scripts/fetch_pe_and_write_sheet.mjs
