@@ -1,4 +1,4 @@
-// HS300 + S&P500 —— 两块详表；Playwright 在页面内同源 fetch /djapi，再退回正文正则；大量 [DEBUG]
+// HS300 + S&P500 —— 两块详表；Playwright 在页面内同源 fetch /djapi；不再等待 networkidle；大量 [DEBUG]
 import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 import { google } from "googleapis";
@@ -16,17 +16,17 @@ const todayStr = () => {
 const numOr = (v,d)=>{ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; };
 const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\s\S]*?<\/style>/gi,"").replace(/<[^>]+>/g," ");
 
-// 判定参数
+// —— 判定参数
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 
-// 兜底（小数）
+// —— 兜底（小数）
 const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
 const RF_US = numOr(process.env.RF_US,       0.0425);
 const PE_OVERRIDE_CN  = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_SPX = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();  return s?Number(s):null; })();
 
-// Sheets
+// —— Google Sheets
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
 const auth = new google.auth.JWT(
@@ -86,11 +86,10 @@ async function rfUS(){
       dbg("rfUS try", url, "status", r.status);
       if(!r.ok) continue;
       const h=await r.text(); dbg("rfUS html len", h.length);
-      // 尝试从主要价格区块抓，匹配不到再退回全页正则；限制 0<值<20
-      let v=null;
-      const m1=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,2})</i);
+      // 最优：主要价格区块
+      let v=null; const m1=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,2})</i);
       if(m1) v=Number(m1[1]);
-      if(!Number.isFinite(v)) {
+      if(!Number.isFinite(v)){
         const text=strip(h);
         const m2=text.match(/(Yield|收益率)[^%]{0,40}?(\d{1,2}\.\d{1,2})\s*%/i) || text.match(/(\d{1,2}\.\d{1,2})\s*%/);
         if(m2) v=Number(m2[2]||m2[1]);
@@ -103,7 +102,7 @@ async function rfUS(){
   return { v:RF_US, tag:"兜底", link:"—" };
 }
 
-// ---------------- ERP*（US） ----------------
+// ---------------- ERP*（US：United States 行内 2%~10% 的第一个；兜底 4.33%） ----------------
 async function erpUS(){
   dbg("erpUS: start");
   try{
@@ -116,18 +115,19 @@ async function erpUS(){
     const text=row.replace(/<[^>]+>/g," ");
     const pcts=[...text.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
     dbg("erpUS row pcts", pcts);
-    const lastNonZero = pcts.reverse().find(x=>x>0);
-    if(Number.isFinite(lastNonZero)) return { v:lastNonZero/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran(US)")` };
+    const candidate = pcts.find(x => x>2 && x<10) ?? 4.33;  // 2%~10% 的第一个
+    return { v: candidate/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran(US)")` };
   }catch(e){ dbg("erpUS error", e.message); }
   dbg("erpUS: fallback 0.0433");
-  return { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
+  return { v:0.0433, tag:"兜底",
+    link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------------- Danjuan：在页面内同源 fetch /djapi ----------------
+// ---------------- Danjuan：Playwright 页面内同源 /djapi ----------------
 async function readPEFromDjapiInPage(page, indexCode){
-  return await page.evaluate(async (code)=>{
+  return await page.evaluate(async (code) => {
     try {
-      const u = `/djapi/index_evaluation/detail?index_code=${code}`;
+      const u = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${code}`;
       const r = await fetch(u, { credentials: "include" });
       if (!r.ok) return null;
       const j = await r.json();
@@ -142,18 +142,18 @@ async function readTopPEWithPW(url, indexCode){
   const pg = await br.newPage();
   pg.setDefaultNavigationTimeout(25000); pg.setDefaultTimeout(20000);
 
-  await pg.goto(url, { waitUntil:"networkidle" });
+  await pg.goto(url, { waitUntil:"domcontentloaded" });   // ← 不再等 networkidle
   dbg("PW goto ok", url);
 
-  // 1) 页面内同源 djapi
+  // 1) 页面内同源 /djapi
   let v = await readPEFromDjapiInPage(pg, indexCode);
   dbg("PW djapi value", v);
 
-  // 2) djapi 为空时尝试正文
+  // 2) djapi 为空时，正文正则
   if(!Number.isFinite(v)){
-    const text = await pg.locator("body").innerText();
-    dbg("PW body len", text.length);
-    const m = text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
+    const text = await pg.locator("body").innerText().catch(()=> "");
+    dbg("PW body len", text?.length || 0);
+    const m = text?.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
     v = m ? Number(m[1]) : null;
     dbg("PW body regex", v);
   }
@@ -168,7 +168,7 @@ async function readTopPEWithPW(url, indexCode){
         if(m) return parseFloat(m[1]);
       }
       return null;
-    });
+    }).catch(()=> null);
     dbg("PW DOM scan", v);
   }
 
@@ -212,7 +212,7 @@ async function peFromDanjuan(url, indexCode, override){
 async function peHS300(){ return await peFromDanjuan("https://danjuanfunds.com/dj-valuation-table-detail/SH000300", "SH000300", PE_OVERRIDE_CN); }
 async function peSPX(){   return await peFromDanjuan("https://danjuanfunds.com/dj-valuation-table-detail/SP500",    "SP500",    PE_OVERRIDE_SPX); }
 
-// ---------------- 写“单块” ----------------
+// ---------------- 单块写入 ----------------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle } = await ensureToday();
 
@@ -224,12 +224,12 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const implied = (ep!=null && Number.isFinite(rf)) ? (ep - rf) : null;
   const peLimit = (Number.isFinite(rf) && Number.isFinite(target)) ? Number((1/(rf+target)).toFixed(2)) : null;
 
-  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit, peTag:peRes.tag, rfTag:rfRes.tag });
+  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit, peTag: peRes.tag, rfTag: rfRes.tag });
 
   let status="需手动更新";
-  if(implied!=null && Number.isFinite(target)){
-    if(implied >= target + 0.005) status="🟢 买点（低估）";
-    else if(implied <= target - 0.005) status="🔴 卖点（高估）";
+  if (implied!=null && Number.isFinite(target)) {
+    if (implied >= target + 0.005) status="🟢 买点（低估）";
+    else if (implied <= target - 0.005) status="🔴 卖点（高估）";
     else status="🟡 持有（合理）";
   }
 
