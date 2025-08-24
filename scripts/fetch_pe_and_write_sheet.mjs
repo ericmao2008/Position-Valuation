@@ -1,5 +1,5 @@
 // HS300 + S&P500 —— 两块详表；HS300 仅用 index-detail/SH000300；SPX 优先 index-detail；
-// E/P、r_f、隐含ERP、目标ERP*、容忍带δ 显示为百分比；大量 [DEBUG]，绝不写 0。
+// E/P、r_f、隐含ERP、目标ERP*、容忍带δ 显示为百分比；大量 [DEBUG]；绝不写 0。
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
@@ -36,7 +36,7 @@ const auth = new google.auth.JWT(
   (process.env.GOOGLE_PRIVATE_KEY||"").replace(/\\n/g,"\n"),
   ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
 );
-const sheets = new google.sheets_v4.Sheets({ auth });
+const sheets = google.sheets({ version:"v4", auth });
 
 // ========== 工具 ==========
 async function ensureToday(){
@@ -65,7 +65,6 @@ async function rfCN(){
   // 1) 有知有行
   try{
     const r=await fetch("https://youzhiyouxing.cn/data",{ headers:{ "User-Agent":"Mozilla/5.0" }, timeout:8000 });
-    dbg("rfCN status", r.status);
     if(r.ok){
       const html=await r.text();
       let m=html.match(/10年期国债到期收益率[^%]{0,200}?(\d+(?:\.\d+)?)\s*%/);
@@ -83,8 +82,8 @@ async function rfCN(){
     const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:8000 });
     if(r.ok){
       const h=await r.text(); const m=h.match(/(\d{1,2}\.\d{1,2})\s*%/);
-      if(m){ const v=Number(m[1])/100; if(Number.isFinite(v)&&v>0&&v<1)
-        return { v, tag:"真实", link:`=HYPERLINK("${url}","CN 10Y (Investing)")` }; }
+      if(m){ const v=Number(m[1])/100;
+        if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","CN 10Y (Investing)")` }; }
     }
   }catch(e){ dbg("rfCN investing err", e.message); }
   // 3) 兜底
@@ -132,7 +131,7 @@ async function erpUS(){
     link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ========== Danjuan：沪深300 仅用 index-detail/SH000300；SPX 优先 index-detail ==========
+// ========== Danjuan：HS300 仅用 index-detail/SH000300；SPX 优先 index-detail ==========
 async function peHS300(){
   const url = "https://danjuanfunds.com/index-detail/SH000300";
 
@@ -146,14 +145,14 @@ async function peHS300(){
       await pg.goto(url, { waitUntil: 'domcontentloaded' });
       await pg.waitForTimeout(3000);
 
-      // 1) 首选：PE + 日期（例如 "PE 08-22 13.97"）
+      // A) 首选：PE + 日期（如 "PE 08-22 13.97"）
       let text = await pg.locator("body").innerText().catch(()=> "");
       dbg("HS300 index-detail body len", text?.length || 0);
       let val  = null;
       let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if (m) val = Number(m[1]);
 
-      // 2) 次选：排除“分位”字样，避免抓到 30/50/70 分位值
+      // B) 次选：排除“分位”文案后抽取小数
       if (!Number.isFinite(val)) {
         const lines = (text || "").split(/\n+/);
         for (const line of lines) {
@@ -164,13 +163,13 @@ async function peHS300(){
         }
       }
 
-      // 3) DOM 穷举兜底
+      // C) DOM 穷举兜底
       if (!Number.isFinite(val)) {
         val = await pg.evaluate(() => {
           const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
           for (const el of Array.from(document.querySelectorAll("body *"))) {
             const t = (el.textContent || "").trim();
-            if (/分位/.test(t)) continue;
+            if (/分位/.test(t)) continue;     // 排除分位值
             const m = t.match(re);
             if (m) return parseFloat(m[1]);
           }
@@ -263,11 +262,11 @@ async function peSPX(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
 }
 
-// ---------- 写单块（E/P、r_f、隐含ERP、目标ERP*、容忍带δ = 百分比） ----------
+// ---------- 写单块（把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ = 百分比） ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle, sheetId } = await ensureToday();
 
-  const pe = Number(peRes.v);                 // 抓不到时 v 为 ""，不会是 0
+  const pe = Number(peRes.v);                 // 抓不到就是 ""，不会是 0
   const rf = Number.isFinite(rfRes.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
 
@@ -302,7 +301,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // 把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ (块内第4~8行，B列) 统一设为百分比 0.00%
+  // 把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ (块内第4~8行，B列) 统一设为 0.00%
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
