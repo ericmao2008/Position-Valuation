@@ -6,10 +6,15 @@ on:
     - cron: '0 3 * * *'   # 11:00 CST (UTC+8)
   workflow_dispatch: {}
 
+# 只保留“最新一条”，避免半途中断
+concurrency:
+  group: daily-valuation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     env:
       # Google 服务账号
@@ -18,24 +23,26 @@ jobs:
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
       # 邮件（可选；不配则脚本跳过）
-      SMTP_HOST: ${{ secrets.SMTP_HOST }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      MAIL_TO:   ${{ vars.MAIL_TO }}
-      MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+      SMTP_HOST:           ${{ secrets.SMTP_HOST }}
+      SMTP_PORT:           ${{ secrets.SMTP_PORT }}
+      SMTP_USER:           ${{ secrets.SMTP_USER }}
+      SMTP_PASS:           ${{ secrets.SMTP_PASS }}
+      MAIL_TO:             ${{ vars.MAIL_TO }}
+      MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
 
-      # 判定参数（留空则脚本默认 5.27% / 0.50%）
-      ERP_TARGET: ${{ vars.ERP_TARGET }}
-      DELTA:      ${{ vars.DELTA }}
-      TZ:         Asia/Shanghai
+      # 判定参数（留空→脚本默认 5.27% / 0.50%）
+      ERP_TARGET:          ${{ vars.ERP_TARGET }}
+      DELTA:               ${{ vars.DELTA }}
+      TZ:                  Asia/Shanghai
 
-      # 兜底（小数）：10Y 默认 1.78%；P/E 可选设一个数，如 13.97
-      RF_OVERRIDE: '0.0178'
-      PE_OVERRIDE: ${{ vars.PE_OVERRIDE }}
+      # 兜底（小数）
+      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}   # HS300 的中国10Y兜底
+      RF_US:               ${{ vars.RF_US }}         # 美国10Y兜底（给标普500）
+      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}   # HS300 的 PE 兜底
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}  # 标普500的 PE 兜底
 
-      # 抓取成功率优先：启用 Playwright 兜底
-      USE_PLAYWRIGHT: '1'
+      # 先保持 0（快且稳），需要更高“真实抓取”时再设为 1
+      USE_PLAYWRIGHT:      '0'
 
     steps:
       - name: Checkout
@@ -50,9 +57,8 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
-      - name: Install Playwright Chromium (optional)
-        if: ${{ env.USE_PLAYWRIGHT == '1' }}
-        run: npx playwright install chromium --with-deps
-
-      - name: Run fetch & write
-        run: node scripts/fetch_pe_and_write_sheet.mjs
+      # 失败自动重试一次（10 秒后）
+      - name: Run fetch & write (with one retry)
+        run: |
+          set -e
+          node scripts/fetch_pe_and_write_sheet.mjs || (echo "retry in 10s" && sleep 10 && node scripts/fetch_pe_and_write_sheet.mjs)
