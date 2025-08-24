@@ -31,26 +31,20 @@ jobs:
       DELTA:               ${{ vars.DELTA }}
       TZ:                  Asia/Shanghai
 
-      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}   # HS300的中国10Y兜底
-      RF_US:               ${{ vars.RF_US }}         # 美国10Y兜底
-      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}   # HS300兜底
-      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}  # 标普500兜底
+      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}   # HS300 中国10Y兜底
+      RF_US:               ${{ vars.RF_US }}         # 美国10Y兜底（给SPX）
+      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}   # HS300 PE兜底
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}  # SPX PE兜底
 
       USE_PLAYWRIGHT:      '0'
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-
-      - name: Install deps
-        run: npm ci || npm i
-
+      - run: npm ci || npm i
       - name: Run fetch & write (with one retry)
         run: |
           set -e
