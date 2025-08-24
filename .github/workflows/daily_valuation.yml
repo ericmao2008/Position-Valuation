@@ -51,22 +51,27 @@ jobs:
       PE_OVERRIDE_N225:     ${{ vars.PE_OVERRIDE_N225 }}
       PE_OVERRIDE_ASX200:   ${{ vars.PE_OVERRIDE_ASX200 }}
       PE_OVERRIDE_NIFTY50:  ${{ vars.PE_OVERRIDE_NIFTY50 }}
-      PE_OVERRIDE_CSIH30533:${{ vars.PE_OVERRIDE_CSIH30533 }}
+      PE_OVERRIDE_CSIH30533: ${{ vars.PE_OVERRIDE_CSIH30533 }}  # ← 修正：冒号后有空格
 
-      # 先设为 0（快速稳定），需要更高真实成功率时再改为 1
+      # 先设为 0（快且稳），后续要更高“真实抓取”再改为 1
       USE_PLAYWRIGHT: '0'
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci || npm i
+
+      - name: Install deps
+        run: npm ci || npm i
+
       - name: Install Playwright Chromium (optional)
         if: ${{ env.USE_PLAYWRIGHT == '1' }}
         run: npx playwright install chromium --with-deps
-      # 失败自动重试一次（10秒后）
+
+      # 失败自动重试一次（10 秒后）
       - name: Run fetch & write (with one retry)
         run: |
           set -e
