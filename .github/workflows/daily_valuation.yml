@@ -1,12 +1,11 @@
-name: Daily Valuation (10:00 & 11:00 Beijing)
+name: Daily Valuation (09:30 & 16:30 Beijing)
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # 10:00 CST (UTC+8)
-    - cron: '0 3 * * *'   # 11:00 CST (UTC+8)
+    - cron: '30 1 * * *'   # 09:30 CST (UTC+8)
+    - cron: '30 8 * * *'   # 16:30 CST (UTC+8)
   workflow_dispatch: {}
 
-# 只保留“最新一条”，避免半途中断
 concurrency:
   group: daily-valuation-${{ github.ref }}
   cancel-in-progress: true
@@ -17,12 +16,10 @@ jobs:
     timeout-minutes: 20
 
     env:
-      # Google 服务账号
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
-      # 邮件（可选；不配则脚本跳过）
       SMTP_HOST:           ${{ secrets.SMTP_HOST }}
       SMTP_PORT:           ${{ secrets.SMTP_PORT }}
       SMTP_USER:           ${{ secrets.SMTP_USER }}
@@ -30,18 +27,15 @@ jobs:
       MAIL_TO:             ${{ vars.MAIL_TO }}
       MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
 
-      # 判定参数（留空→脚本默认 5.27% / 0.50%）
       ERP_TARGET:          ${{ vars.ERP_TARGET }}
       DELTA:               ${{ vars.DELTA }}
       TZ:                  Asia/Shanghai
 
-      # 兜底（小数）
-      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}   # HS300 的中国10Y兜底
-      RF_US:               ${{ vars.RF_US }}         # 美国10Y兜底（给标普500）
-      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}   # HS300 的 PE 兜底
-      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}  # 标普500的 PE 兜底
+      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}   # HS300的中国10Y兜底
+      RF_US:               ${{ vars.RF_US }}         # 美国10Y兜底
+      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}   # HS300兜底
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}  # 标普500兜底
 
-      # 先保持 0（快且稳），需要更高“真实抓取”时再设为 1
       USE_PLAYWRIGHT:      '0'
 
     steps:
@@ -57,7 +51,6 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
-      # 失败自动重试一次（10 秒后）
       - name: Run fetch & write (with one retry)
         run: |
           set -e
