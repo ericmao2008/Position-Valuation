@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: '0 2 * * *'    # 北京时间 10:00 (UTC 02:00)
     - cron: '30 2 * * *'   # 北京时间 10:30 (UTC 02:30)
+    - cron: '45 2 * * *'   # 北京时间 10:45（临时验证用）
   workflow_dispatch: {}
 
 jobs:
