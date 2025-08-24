@@ -6,6 +6,7 @@ on:
     - cron: '30 8 * * *'   # 16:30 CST (UTC+8)
   workflow_dispatch: {}
 
+# 只保留“最新一条”，避免半途中断/半页
 concurrency:
   group: daily-valuation-${{ github.ref }}
   cancel-in-progress: true
@@ -16,11 +17,12 @@ jobs:
     timeout-minutes: 30
 
     env:
+      # Google
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
-      # 邮件（可选）
+      # 邮件（可选；不填自动跳过）
       SMTP_HOST:           ${{ secrets.SMTP_HOST }}
       SMTP_PORT:           ${{ secrets.SMTP_PORT }}
       SMTP_USER:           ${{ secrets.SMTP_USER }}
@@ -41,7 +43,6 @@ jobs:
 
       # 开 Playwright（抓红圈 PE）
       USE_PLAYWRIGHT:      '1'
-      # 开详细日志
       DEBUG_VERBOSE:       '1'
 
     steps:
