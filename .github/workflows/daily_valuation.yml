@@ -6,7 +6,7 @@ on:
     - cron: '0 3 * * *'   # 11:00 CST
   workflow_dispatch: {}
 
-# 关键：同一分支只保留“正在跑的最后一条”
+# 同一分支只保留“最后一条”运行；新来的取消旧的，防止半途被顶掉
 concurrency:
   group: daily-valuation-${{ github.ref }}
   cancel-in-progress: true
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15   # 提高超时，避免首装 Playwright 被中断
+    timeout-minutes: 20
 
     env:
       # Google 服务账号
@@ -30,16 +30,32 @@ jobs:
       MAIL_TO:   ${{ vars.MAIL_TO }}
       MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
 
-      # 判定参数
+      # 判定参数（可留空，脚本默认 5.27% / 0.50%）
       ERP_TARGET: ${{ vars.ERP_TARGET }}
       DELTA:      ${{ vars.DELTA }}
       TZ:         Asia/Shanghai
 
-      # 兜底（小数）
-      RF_OVERRIDE: '0.0178'
-      PE_OVERRIDE: ${{ vars.PE_OVERRIDE }}
+      # 兜底参数（小数）
+      RF_OVERRIDE: '0.0178'        # 中国 10Y 兜底
+      PE_OVERRIDE: ${{ vars.PE_OVERRIDE }}  # HS300 兜底
 
-      # 抓取成功率优先：启用 Playwright（如要更快可改 '0'）
+      # 海外指数兜底PE（小数；任选填）
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}
+      PE_OVERRIDE_NDX:     ${{ vars.PE_OVERRIDE_NDX }}
+      PE_OVERRIDE_DAX:     ${{ vars.PE_OVERRIDE_DAX }}
+      PE_OVERRIDE_N225:    ${{ vars.PE_OVERRIDE_N225 }}
+      PE_OVERRIDE_ASX200:  ${{ vars.PE_OVERRIDE_ASX200 }}
+      PE_OVERRIDE_NIFTY50: ${{ vars.PE_OVERRIDE_NIFTY50 }}
+
+      # 海外国家 10Y 兜底（小数；任选填）
+      RF_US: ${{ vars.RF_US }}
+      RF_DE: ${{ vars.RF_DE }}
+      RF_JP: ${{ vars.RF_JP }}
+      RF_AU: ${{ vars.RF_AU }}
+      RF_IN: ${{ vars.RF_IN }}
+      RF_VN: ${{ vars.RF_VN }}
+
+      # 抓取成功率优先：启用 Playwright（如需速度可设为 '0'）
       USE_PLAYWRIGHT: '1'
 
     steps:
@@ -55,9 +71,13 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
+      # 安装 Playwright 浏览器（仅在 USE_PLAYWRIGHT=1 时）
       - name: Install Playwright Chromium (optional)
         if: ${{ env.USE_PLAYWRIGHT == '1' }}
         run: npx playwright install chromium --with-deps
 
-      - name: Run fetch & write
-        run: node scripts/fetch_pe_and_write_sheet.mjs
+      # 给脚本一次自动重试的机会（防抖：10s）
+      - name: Run fetch & write (with one retry)
+        run: |
+          set -e
+          node scripts/fetch_pe_and_write_sheet.mjs || (echo "retry in 10s" && sleep 10 && node scripts/fetch_pe_and_write_sheet.mjs)
