@@ -1,13 +1,13 @@
-// HS300 + S&P500 —— 两块详表；Playwright抓“顶部红圈PE”；SPX专用 index-detail/SP500 加固；大量 [DEBUG]
+// HS300 + S&P500 —— 两块详表；Playwright 稳定抓“顶部红圈 PE”；E/P、r_f、隐含ERP 显示为百分比；大量 [DEBUG]
 import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 import { google } from "googleapis";
 
-const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-const USE_PW = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
-const DEBUG  = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
-const TZ     = process.env.TZ || "Asia/Shanghai";
-const dbg = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const USE_PW  = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
+const DEBUG   = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
+const TZ      = process.env.TZ || "Asia/Shanghai";
+const dbg     = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
 const todayStr = () => {
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
@@ -21,8 +21,8 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 
 // —— 兜底（小数）
-const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
-const RF_US = numOr(process.env.RF_US,       0.0425);
+const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);   // HS300 中国10Y兜底
+const RF_US = numOr(process.env.RF_US,       0.0425);   // SPX   美国10Y兜底
 const PE_OVERRIDE_CN  = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_SPX = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();  return s?Number(s):null; })();
 
@@ -76,7 +76,6 @@ async function rfCN(){
   dbg("rfCN: fallback", RF_CN);
   return { v:RF_CN, tag:"兜底", link:"—" };
 }
-
 async function rfUS(){
   dbg("rfUS: start");
   const urls=["https://cn.investing.com/rates-bonds/u.s.-10-year-bond-yield",
@@ -124,10 +123,9 @@ async function erpUS(){
     link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------------- Danjuan：HS300用 valuation-table；SPX专用 index-detail ----------------
-async function peFromValuationPage(code, override){     // 供 HS300 使用
+// ---------------- Danjuan：HS300走估值页+djapi；SPX走 index-detail/SP500 ----------------
+async function peFromValuationPage(code, override){
   const valUrl = `https://danjuanfunds.com/dj-valuation-table-detail/${code}`;
-  // Playwright + page.request 访问 /djapi
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -135,7 +133,7 @@ async function peFromValuationPage(code, override){     // 供 HS300 使用
       const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
       const pg  = await ctx.newPage();
       await pg.goto(valUrl, { waitUntil:"domcontentloaded" });
-      // 尝试在同源上下文访问 /djapi
+      // 直接同源请求 /djapi
       const apiUrl = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${code}`;
       const resp = await pg.request.get(apiUrl, { headers:{ "Referer": valUrl, "User-Agent": UA }, timeout:15000 });
       dbg("HS300 /djapi status", resp.status());
@@ -172,8 +170,8 @@ async function peFromValuationPage(code, override){     // 供 HS300 使用
   return { v:"", tag:"兜底", link:`=HYPERLINK("${valUrl}","Danjuan")` };
 }
 
-// —— SPX 专用：优先 index-detail，再退估值页 —— //
 async function peSPX(){
+  // 优先 index-detail（页面顶部更稳定）
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -182,10 +180,8 @@ async function peSPX(){
       const pg  = await ctx.newPage();
       const url = "https://danjuanfunds.com/index-detail/SP500";
       await pg.goto(url, { waitUntil:"domcontentloaded" });
-      // 给前端注入一点时间
-      await pg.waitForTimeout(3000);
+      await pg.waitForTimeout(3000);  // 给前端注入时间
 
-      // A) 先抓 body 文本
       let text = await pg.locator("body").innerText().catch(()=> "");
       dbg("SPX index-detail body len", text?.length || 0);
       let m = text && text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
@@ -194,8 +190,6 @@ async function peSPX(){
         await br.close();
         if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` };
       }
-
-      // B) DOM 穷举
       const v2 = await pg.evaluate(()=>{
         const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
         for(const el of Array.from(document.querySelectorAll("body *"))){
@@ -204,13 +198,13 @@ async function peSPX(){
           if(m) return parseFloat(m[1]);
         }
         return null;
-      });
+      }).catch(()=> null);
       await br.close();
       if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` };
     }catch(e){ dbg("SPX index-detail PW error", e.message); }
   }
 
-  // C) 仍未命中：退回 valuation-table-detail 的 HTTP/JSON
+  // 仍未命中：退到估值表页（HTTP 正则/JSON）
   const urlVal = "https://danjuanfunds.com/dj-valuation-table-detail/SP500";
   try{
     const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:15000 });
@@ -227,19 +221,18 @@ async function peSPX(){
     }
   }catch(e){ dbg("SPX valuation HTTP err", e.message); }
 
-  // D) 兜底
+  // 兜底（绝不返回 0）
   if(PE_OVERRIDE_SPX!=null) return { v:PE_OVERRIDE_SPX, tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
 }
 
-// —— HS300：沿用估值页 + /djapi + 文本；你这边已成功 —— //
 async function peHS300(){ return await peFromValuationPage("SH000300", PE_OVERRIDE_CN); }
 
-// ---------------- 单块写入 ----------------
+// ---------------- 单块写入（含：E/P、r_f、隐含ERP → 百分比显示） ----------------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
-  const { sheetTitle } = await ensureToday();
+  const { sheetTitle, sheetId } = await ensureToday();
 
-  const pe = Number(peRes.v);                 // 抓不到就是 ""，不会是 0
+  const pe = Number(peRes.v);                       // 抓不到时 v 为 ""，不会是 0
   const rf = Number.isFinite(rfRes.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
 
@@ -270,8 +263,32 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     ["判定", status, (implied!=null && Number.isFinite(target))?"真实":"兜底", "买点/持有/卖点/需手动","—"],
   ];
 
+  // 写入
   const end = startRow + rows.length - 1;
-  await write(`'${todayStr()}'!A${startRow}:E${end}`, rows);
+  await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+
+  // （新增）把 E/P、r_f、隐含ERP 的 B 列设置为百分比 0.00%
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: (startRow - 1) + 3, // 第 4 行（E/P）
+              endRowIndex:   (startRow - 1) + 6, // 第 6 行（隐含ERP）之后不含
+              startColumnIndex: 1,               // B 列
+              endColumnIndex:   2
+            },
+            cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
+        }
+      ]
+    }
+  });
+
   return end + 2;
 }
 
