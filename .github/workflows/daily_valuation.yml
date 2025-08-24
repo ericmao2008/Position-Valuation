@@ -10,12 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
 
-    # 统一在 job 级声明 env（脚本读取；此版不启用 Playwright）
     env:
+      # Google 服务账号
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
+      # 邮件（可选）
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
       SMTP_PORT: ${{ secrets.SMTP_PORT }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -23,12 +24,14 @@ jobs:
       MAIL_TO:   ${{ vars.MAIL_TO }}
       MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
 
+      # 估值参数（可留空，脚本回落默认 5.27% / 0.50%）
       ERP_TARGET: ${{ vars.ERP_TARGET }}
       DELTA:      ${{ vars.DELTA }}
       TZ:         Asia/Shanghai
 
-      # 固定基线：不启用 Playwright；10Y 兜底 1.78%
+      # 兜底：10Y=1.78%；如需 P/E 兜底（13.97），可在仓库 Variables 设置 PE_OVERRIDE='13.97'
       RF_OVERRIDE: '0.0178'
+      PE_OVERRIDE: ${{ vars.PE_OVERRIDE }}
 
     steps:
       - name: Checkout
@@ -43,7 +46,7 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
-      # 不安装 Playwright（基线不需要）
+      # Playwright 不需要（基线不用）
       # - name: Install Playwright Chromium (optional)
       #   run: npx playwright install chromium --with-deps
 
