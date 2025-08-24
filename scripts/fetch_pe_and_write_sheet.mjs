@@ -1,4 +1,4 @@
-// HS300 + S&P500 —— 两块详表；Playwright 在页面内同源 fetch /djapi；不再等待 networkidle；大量 [DEBUG]
+// HS300 + S&P500 —— 两块详表；Playwright 用 page.request 同源 GET /djapi；正文/HTTP 正则兜底；绝不写 0；大量 [DEBUG]
 import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 import { google } from "googleapis";
@@ -26,7 +26,7 @@ const RF_US = numOr(process.env.RF_US,       0.0425);
 const PE_OVERRIDE_CN  = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_SPX = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();  return s?Number(s):null; })();
 
-// —— Google Sheets
+// —— Sheets
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
 const auth = new google.auth.JWT(
@@ -86,8 +86,8 @@ async function rfUS(){
       dbg("rfUS try", url, "status", r.status);
       if(!r.ok) continue;
       const h=await r.text(); dbg("rfUS html len", h.length);
-      // 最优：主要价格区块
-      let v=null; const m1=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,2})</i);
+      let v=null;
+      const m1=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,2})</i);
       if(m1) v=Number(m1[1]);
       if(!Number.isFinite(v)){
         const text=strip(h);
@@ -123,60 +123,59 @@ async function erpUS(){
     link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------------- Danjuan：Playwright 页面内同源 /djapi ----------------
-async function readPEFromDjapiInPage(page, indexCode){
-  return await page.evaluate(async (code) => {
-    try {
-      const u = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${code}`;
-      const r = await fetch(u, { credentials: "include" });
-      if (!r.ok) return null;
-      const j = await r.json();
-      return Number(j?.data?.pe_ttm ?? j?.data?.pe ?? j?.data?.valuation?.pe_ttm) || null;
-    } catch { return null; }
-  }, indexCode);
-}
-
-async function readTopPEWithPW(url, indexCode){
+// ---------------- Danjuan：Playwright page.request 同源 GET /djapi ----------------
+async function readPEWithPageRequest(url, indexCode){
   const { chromium } = await import("playwright");
-  const br = await chromium.launch({ headless:true });
-  const pg = await br.newPage();
-  pg.setDefaultNavigationTimeout(25000); pg.setDefaultTimeout(20000);
+  const br = await chromium.launch({
+    headless:true,
+    args: ['--disable-blink-features=AutomationControlled']
+  });
+  const ctx = await br.newContext({
+    userAgent: UA,
+    locale: 'zh-CN',
+    timezoneId: TZ, // 使用与运行环境一致的时区
+  });
+  const pg = await ctx.newPage();
 
-  await pg.goto(url, { waitUntil:"domcontentloaded" });   // ← 不再等 networkidle
-  dbg("PW goto ok", url);
+  // 不等 networkidle，直接到 domcontentloaded
+  await pg.goto(url, { waitUntil:"domcontentloaded" });
+  dbg("PW page.request djapi start", indexCode);
 
-  // 1) 页面内同源 /djapi
-  let v = await readPEFromDjapiInPage(pg, indexCode);
-  dbg("PW djapi value", v);
-
-  // 2) djapi 为空时，正文正则
-  if(!Number.isFinite(v)){
-    const text = await pg.locator("body").innerText().catch(()=> "");
-    dbg("PW body len", text?.length || 0);
-    const m = text?.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
-    v = m ? Number(m[1]) : null;
-    dbg("PW body regex", v);
+  let v = null;
+  try {
+    const apiUrl = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${indexCode}`;
+    const resp = await pg.request.get(apiUrl, {
+      headers: { "Referer": url, "User-Agent": UA },
+      timeout: 15000
+    });
+    dbg("PW page.request status", resp.status());
+    if (resp.ok()) {
+      const j = await resp.json();
+      v = Number(j?.data?.pe_ttm ?? j?.data?.pe ?? j?.data?.valuation?.pe_ttm) || null;
+      dbg("PW page.request pe", v);
+    }
+  } catch (e) {
+    dbg("PW page.request error", e.message);
   }
 
-  // 3) DOM 枚举兜底
-  if(!Number.isFinite(v)){
-    v = await pg.evaluate(()=>{
-      const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
-      for(const el of Array.from(document.querySelectorAll("body *"))){
-        const t = (el.textContent || "").trim();
-        const m = t.match(re);
-        if(m) return parseFloat(m[1]);
-      }
-      return null;
-    }).catch(()=> null);
-    dbg("PW DOM scan", v);
+  // 再退：正文正则
+  if (!Number.isFinite(v)) {
+    try {
+      const text = await pg.locator("body").innerText();
+      dbg("PW body len", text.length);
+      const m = text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
+      v = m ? Number(m[1]) : null;
+      dbg("PW body regex", v);
+    } catch (e) {
+      dbg("PW body error", e.message);
+    }
   }
 
   await br.close();
   return Number.isFinite(v)&&v>0&&v<1000 ? v : null;
 }
 
-async function readTopPEFallback(url){
+async function readPEHttpFallback(url){
   try{
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
     dbg("HTTP fallback status", r.status);
@@ -195,14 +194,12 @@ async function readTopPEFallback(url){
 async function peFromDanjuan(url, indexCode, override){
   dbg("peFromDanjuan", url, "USE_PW=", USE_PW);
   if (USE_PW) {
-    try{
-      const v = await readTopPEWithPW(url, indexCode);
-      dbg("PW result", v);
-      if (v!=null) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
-    }catch(e){ dbg("PW err", e.message); }
+    const v = await readPEWithPageRequest(url, indexCode);
+    dbg("PW final pe", v);
+    if (v!=null) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
   }
-  const v2 = await readTopPEFallback(url);
-  dbg("HTTP result", v2);
+  const v2 = await readPEHttpFallback(url);
+  dbg("HTTP final pe", v2);
   if (v2!=null) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
   if (override!=null) { dbg("use override", override); return { v:override, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` }; }
   dbg("no value, return empty");
