@@ -1,6 +1,7 @@
 // === Danjuan PE → Google Sheet (Existing Workbook, daily new tab + email) ===
-// 固定基线：不启用 Playwright；P/E=蛋卷(JSON→HTML)；10Y=有知有行(文本)；抓不到用 1.78% 兜底
-// 写入“总表”每日新 tab（YYYY-MM-DD），数值格式与超链接；SMTP 未配置时自动跳过发信
+// 固定基线：不启用 Playwright；P/E=蛋卷(JSON→HTML)；10Y=有知有行(文本)；
+// 兜底：PE_OVERRIDE（可空）、RF_OVERRIDE=1.78%（默认）
+// 写入“总表”每日新 tab（YYYY-MM-DD）；SMTP 未配置自动跳过发信
 
 import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
@@ -24,14 +25,22 @@ const numOrDefault = (v, d) => {
 };
 
 // 估值参数（允许留空，代码回落默认）
-const ERP_TARGET = numOrDefault(process.env.ERP_TARGET, 0.0527); // 5.27%
-const DELTA      = numOrDefault(process.env.DELTA,      0.005);  // 0.50%
-const RF_OVERRIDE = numOrDefault(process.env.RF_OVERRIDE, 0.0178); // 兜底 1.78%（确保必出结果）
-const TZ = process.env.TZ || 'Asia/Shanghai';
+const ERP_TARGET = numOrDefault(process.env.ERP_TARGET, 0.0527);  // 5.27%
+const DELTA      = numOrDefault(process.env.DELTA,      0.005);   // 0.50%
 
+// 兜底：P/E、10Y（小数）；PE_OVERRIDE 可留空，RF_OVERRIDE 默认 1.78%
+const PE_OVERRIDE = (() => {
+  const s = (process.env.PE_OVERRIDE ?? '').toString().trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 && n < 1000 ? n : null;
+})();
+const RF_OVERRIDE = numOrDefault(process.env.RF_OVERRIDE, 0.0178); // 1.78%
+
+const TZ = process.env.TZ || 'Asia/Shanghai';
 const todayStr = () => format(new Date(new Date().toLocaleString('en-US', { timeZone: TZ })), 'yyyy-MM-dd');
 
-// ------------------ 蛋卷 P/E（JSON→HTML） ------------------
+// ------------------ 蛋卷 P/E（JSON→HTML；抓不到用 PE_OVERRIDE） ------------------
 async function getPE_fromJSON() {
   try {
     const res = await fetch(DJ_JSON, { headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': DJ_HTML, 'Accept': 'application/json' }, timeout: 8000 });
@@ -70,7 +79,7 @@ async function getChina10Y() {
 }
 
 // ------------------ 写入总表 + 邮件 ------------------
-async function writeToExistingWorkbookAndEmail({ pe, rf }) {
+async function writeToExistingWorkbookAndEmail({ pe, rf, peSourceNote }) {
   const auth = new google.auth.JWT(
     process.env.GOOGLE_CLIENT_EMAIL,
     undefined,
@@ -104,9 +113,9 @@ async function writeToExistingWorkbookAndEmail({ pe, rf }) {
   const values = [
     ['字段','数值','说明','数据源'],
     ['指数','沪深300','本工具演示以沪深300为例，可扩展', linkCSI],
-    ['P/E（TTM）', pe, '蛋卷基金 index-detail（JSON/HTML）', linkDanjuan],
+    ['P/E（TTM）', pe, `蛋卷基金 index-detail（${peSourceNote}）`, linkDanjuan],
     ['E/P = 1 / P/E', ep, '盈收益率（小数，显示为百分比）', dash],
-    ['无风险利率 r_f（10Y名义）', rf, '有知有行（文本）', linkYouzhiyouxing],
+    ['无风险利率 r_f（10Y名义）', rf, '有知有行（文本；抓不到用兜底）', linkYouzhiyouxing],
     ['隐含ERP = E/P − r_f', impliedERP, '市场给予的风险补偿（小数，显示为百分比）', dash],
     ['目标 ERP*', ERP_TARGET, '建议参考达摩达兰', linkDamodaran],
     ['容忍带 δ', DELTA, '减少频繁切换', dash],
@@ -151,7 +160,7 @@ async function writeToExistingWorkbookAndEmail({ pe, rf }) {
   console.log('Wrote to:', `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=0`, 'tab=', sheetTitle);
 
   // 邮件（未配 SMTP 则自动跳过）
-  await sendEmail({ sheetTitle, status, ep, rf, impliedERP, pe, peLimit, spreadsheetId });
+  await sendEmail({ sheetTitle, status, ep, rf, impliedERP, pe, peLimit: (rf!=null ? (1/(rf+ERP_TARGET)) : null), spreadsheetId });
 }
 
 async function sendEmail({ sheetTitle, status, ep, rf, impliedERP, pe, peLimit, spreadsheetId }) {
@@ -186,8 +195,13 @@ async function sendEmail({ sheetTitle, status, ep, rf, impliedERP, pe, peLimit, 
 
 // ------------------ 主流程 ------------------
 (async () => {
-  let pe = await getPE_fromJSON() || await getPE_fromHTML();  // 不启用 Playwright
-  const rf = await getChina10Y();                              // 文本+兜底
-  if (!pe) console.warn('警告：未从蛋卷拿到 P/E。');
-  await writeToExistingWorkbookAndEmail({ pe, rf });
+  let pe = await getPE_fromJSON();
+  let peSourceNote = 'JSON';
+  if (!pe) { pe = await getPE_fromHTML(); peSourceNote = 'HTML'; }
+  if (!pe && PE_OVERRIDE) { pe = PE_OVERRIDE; peSourceNote = 'OVERRIDE'; }
+
+  const rf = await getChina10Y();  // 文本抓取；抓不到用兜底 1.78%
+
+  if (!pe) console.warn('警告：未从蛋卷拿到 P/E，且未设置 PE_OVERRIDE。');
+  await writeToExistingWorkbookAndEmail({ pe, rf, peSourceNote });
 })().catch(e => { console.error(e); process.exit(1); });
