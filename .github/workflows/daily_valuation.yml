@@ -6,7 +6,6 @@ on:
     - cron: '30 8 * * *'   # 16:30 CST (UTC+8)
   workflow_dispatch: {}
 
-# 只保留“最新一条”，避免半途中断/半页
 concurrency:
   group: daily-valuation-${{ github.ref }}
   cancel-in-progress: true
@@ -17,12 +16,11 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # Google
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
-      # 邮件（如不需要可不填，脚本会跳过）
+      # 邮件（可选）
       SMTP_HOST:           ${{ secrets.SMTP_HOST }}
       SMTP_PORT:           ${{ secrets.SMTP_PORT }}
       SMTP_USER:           ${{ secrets.SMTP_USER }}
@@ -30,19 +28,21 @@ jobs:
       MAIL_TO:             ${{ vars.MAIL_TO }}
       MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
 
-      # 判定（留空→脚本默认 5.27% / 0.50%）
+      # 判定参数（留空→脚本默认 5.27% / 0.50%）
       ERP_TARGET:          ${{ vars.ERP_TARGET }}
       DELTA:               ${{ vars.DELTA }}
       TZ:                  Asia/Shanghai
 
       # 兜底（小数）
-      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}       # HS300 中国10Y兜底（如 0.0178）
-      RF_US:               ${{ vars.RF_US }}             # 美国10Y兜底（如 0.0425）
-      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}       # HS300 PE兜底（如 13.97）
-      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}   # SPX   PE兜底（如 28.15）
+      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}        # HS300 中国10Y兜底（如 0.0178）
+      RF_US:               ${{ vars.RF_US }}              # 美国10Y兜底（如 0.0425）
+      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}        # HS300 PE兜底（如 13.97）
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}    # SPX   PE兜底（如 28.15）
 
-      # 抓动态页面的顶部 PE（红圈）——建议开启
+      # 开 Playwright（抓红圈 PE）
       USE_PLAYWRIGHT:      '1'
+      # 开详细日志
+      DEBUG_VERBOSE:       '1'
 
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +54,6 @@ jobs:
         run: npm ci || npm i
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
-      # 失败自动重试一次（10s 后）
       - name: Run fetch & write (with one retry)
         run: |
           set -e
