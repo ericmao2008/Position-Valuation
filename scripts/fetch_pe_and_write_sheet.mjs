@@ -1,58 +1,109 @@
-name: Daily Valuation (10:00 Beijing)
+import fetch from "node-fetch";
+import { google } from "googleapis";
+import nodemailer from "nodemailer";
 
-on:
-  schedule:
-    - cron: '0 2 * * *'   # 02:00 UTC = 北京时间 10:00
-  workflow_dispatch: {}
+// Google Sheets API Auth
+const auth = new google.auth.JWT(
+  process.env.GOOGLE_CLIENT_EMAIL,
+  null,
+  (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n"),
+  ["https://www.googleapis.com/auth/spreadsheets"]
+);
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+const sheets = google.sheets({ version: "v4", auth });
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+// 获取 P/E 数据
+async function getPE() {
+  let source = "兜底";
+  let pe = process.env.PE_OVERRIDE ? parseFloat(process.env.PE_OVERRIDE) : null;
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
+  try {
+    const res = await fetch("https://danjuanfunds.com/djapi/index_evaluation/detail/SH000300");
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.data?.pe_ttm) {
+        pe = parseFloat(data.data.pe_ttm);
+        source = "真实";
+      }
+    }
+  } catch (err) {
+    console.warn("抓取 PE 失败，使用兜底值");
+  }
 
-      - name: Install deps
-        run: npm ci || npm i
+  return { pe, source };
+}
 
-      # Playwright 浏览器安装（仅在 USE_PLAYWRIGHT=1 时执行）
-      - name: Install Playwright Chromium (optional)
-        if: env.USE_PLAYWRIGHT == '1'
-        run: npx playwright install chromium --with-deps
+// 获取无风险利率
+async function getRF() {
+  let source = "兜底";
+  let rf = process.env.RF_OVERRIDE ? parseFloat(process.env.RF_OVERRIDE) : null;
 
-      - name: Run fetch & write
-        env:
-          # Google 服务账号
-          GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-          GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
-          SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
+  try {
+    const res = await fetch("https://youzhiyouxing.cn/data");
+    const text = await res.text();
+    const match = text.match(/10年期国债到期收益率[^0-9]*([\d.]+)%/);
+    if (match) {
+      rf = parseFloat(match[1]) / 100.0;
+      source = "真实";
+    }
+  } catch (err) {
+    console.warn("抓取 RF 失败，使用兜底值");
+  }
 
-          # 邮件（可选）
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_TO:   ${{ vars.MAIL_TO }}
-          MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+  return { rf, source };
+}
 
-          # 判定参数（默认 5.27% / 0.50%）
-          ERP_TARGET: ${{ vars.ERP_TARGET }}
-          DELTA:      ${{ vars.DELTA }}
+// 写入 Google Sheet
+async function writeSheet(peResult, rfResult) {
+  const values = [
+    ["字段", "数值", "说明", "数据源"],
+    ["指数", "沪深300", "本工具演示以沪深300为例", "中证指数有限公司"],
+    ["P/E (TTM)", peResult.pe, "蛋卷基金 HTML/JSON", "Danjian - " + peResult.source],
+    ["E/P = 1/PE", (1 / peResult.pe).toFixed(4), "盈收益率（小数，显示为百分比）", "—"],
+    ["无风险利率 r_f", (rfResult.rf * 100).toFixed(2) + "%", "有知有行（仅用该站）", "Youzhiyouxing - " + rfResult.source],
+    ["目标 ERP*", process.env.ERP_TARGET || "5.27%", "参考达摩达兰", "Damodaran"],
+    ["容忍带 δ", process.env.DELTA || "0.50%", "减少频繁切换", "—"]
+  ];
 
-          # Playwright 开关
-          USE_PLAYWRIGHT: '1'
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: process.env.SPREADSHEET_ID,
+    range: "Sheet1!A1:D7",
+    valueInputOption: "RAW",
+    requestBody: { values }
+  });
+}
 
-          # 兜底值（只在真实抓取失败时用）
-          RF_OVERRIDE: '0.0178'
-          PE_OVERRIDE: ''
+// 邮件推送
+async function sendMail(peResult, rfResult) {
+  if (!process.env.SMTP_HOST) {
+    console.log("未配置 SMTP，跳过邮件发送");
+    return;
+  }
 
-          TZ: Asia/Shanghai
-        run: node scripts/fetch_pe_and_write_sheet.mjs
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT,
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+
+  const mail = {
+    from: `"${process.env.MAIL_FROM_NAME}" <${process.env.SMTP_USER}>`,
+    to: process.env.MAIL_TO,
+    subject: `沪深300 估值日报`,
+    text: `PE: ${peResult.pe} (${peResult.source})\nRF: ${rfResult.rf} (${rfResult.source})`
+  };
+
+  await transporter.sendMail(mail);
+}
+
+// 主流程
+(async () => {
+  const peResult = await getPE();
+  const rfResult = await getRF();
+  await writeSheet(peResult, rfResult);
+  await sendMail(peResult, rfResult);
+})();
