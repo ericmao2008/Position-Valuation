@@ -1,13 +1,12 @@
 // === Danjuan PE → Google Sheet (Existing Workbook, daily new tab + email) ===
 // 功能：
-// 1) 蛋卷 P/E 无登录抓取（JSON → HTML → Playwright兜底，可选）
-// 2) 有知有行 10Y（先纯文本，必要时可启用 Playwright 兜底；也支持 RF_OVERRIDE）
-// 3) 写入“总表”：每日新建 YYYY-MM-DD 标签页，并设置数值格式与可点击数据源链接
-// 4) 邮件通知（SMTP 可选）：未配置则自动跳过，不会报错
+// 1) 蛋卷 P/E 无登录抓取（JSON → HTML → 可选 Playwright兜底，仅在 USE_PLAYWRIGHT='1' 时启用）
+// 2) 有知有行 10Y（先纯文本；可选 Playwright兜底；也支持 RF_OVERRIDE）
+// 3) 写入“总表”：每日新建 YYYY-MM-DD 标签页，设置数值格式与超链接
+// 4) 邮件通知（SMTP 可选）：未配置则自动跳过
 
 import fetch from 'node-fetch';
 import nodemailer from 'nodemailer';
-import { chromium } from 'playwright';
 import { google } from 'googleapis';
 import { format } from 'date-fns';
 
@@ -20,6 +19,7 @@ const CSI_HOME = 'https://www.csindex.com.cn/zh-CN/indices/index-detail/000300';
 const YZYX_DATA = 'https://youzhiyouxing.cn/data';
 const DAMODARAN_CRP = 'https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html';
 
+// 数字解析安全函数
 const numOrDefault = (v, d) => {
   if (v === undefined || v === null) return d;
   const s = String(v).trim();
@@ -28,13 +28,13 @@ const numOrDefault = (v, d) => {
   return Number.isFinite(n) ? n : d;
 };
 
-// 健壮默认：即使 GitHub 传入空字符串，也回落到默认值
+// 估值参数（允许不配置，自动回落到默认值）
 const ERP_TARGET = numOrDefault(process.env.ERP_TARGET, 0.0527); // 5.27%
 const DELTA      = numOrDefault(process.env.DELTA,      0.005);  // 0.50%
 
-// 性能/稳定性开关（工作流里可配置）
+// 性能/稳定性开关
 const tz              = process.env.TZ || 'Asia/Shanghai';
-const USE_PLAYWRIGHT  = String(process.env.USE_PLAYWRIGHT ?? '0') === '1';  // 默认关闭兜底渲染，最快
+const USE_PLAYWRIGHT  = String(process.env.USE_PLAYWRIGHT ?? '0') === '1';
 const RF_OVERRIDE     = (process.env.RF_OVERRIDE && String(process.env.RF_OVERRIDE).trim() !== '')
   ? Number(process.env.RF_OVERRIDE) : null; // 例如 0.0178（小数）
 
@@ -71,7 +71,9 @@ async function getPE_fromHTML() {
   return null;
 }
 
+// 仅在 USE_PLAYWRIGHT='1' 时才会调用（避免未安装浏览器时报错）
 async function getPE_withPlaywrightFallback() {
+  const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   page.setDefaultNavigationTimeout(10000);
@@ -100,9 +102,8 @@ async function getPE_withPlaywrightFallback() {
 }
 
 // --------------------------------- 抓取 10Y（有知有行） ---------------------------------
-// 先纯文本（最快）；若 USE_PLAYWRIGHT=1 则渲染兜底；仍失败且 RF_OVERRIDE 有值则使用覆盖值
 async function getChina10Y() {
-  // A) 文本解析
+  // A) 文本解析 —— 最快
   try {
     const res = await fetch(YZYX_DATA, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 6000 });
     if (res.ok) {
@@ -112,9 +113,10 @@ async function getChina10Y() {
     }
   } catch {}
 
-  // B) 渲染兜底（可选）
+  // B) 渲染兜底（仅在 USE_PLAYWRIGHT='1' 时启用）
   if (USE_PLAYWRIGHT) {
     try {
+      const { chromium } = await import('playwright');
       const browser = await chromium.launch({ headless: true });
       const page = await browser.newPage();
       page.setDefaultNavigationTimeout(10000);
@@ -141,7 +143,7 @@ async function getChina10Y() {
     } catch {}
   }
 
-  // C) 覆盖值
+  // C) 覆盖值（最后兜底）
   if (Number.isFinite(RF_OVERRIDE)) return RF_OVERRIDE;
 
   return null;
@@ -207,14 +209,14 @@ async function writeToExistingWorkbookAndEmail({ pe, rf }) {
     spreadsheetId, range, valueInputOption: 'USER_ENTERED', requestBody: { values }
   });
 
-  // 设置数值格式
+  // 数值格式
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const tar = meta.data.sheets.find(s => s.properties.title === sheetTitle);
   if (tar && typeof tar.properties.sheetId === 'number') {
     const sheetId = tar.properties.sheetId;
     const cell = r => ({ sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 });
     const reqs = [];
-    // 百分比：E/P、r_f、隐含ERP、ERP*、δ
+    // 百分比：E/P、r_f、隐含ERP、ERP*、δ（B2=1，B3=2…这里以 0 起始行号：第 4 行索引3）
     [3,4,5,6,7].forEach(r => reqs.push({
       repeatCell: { range: cell(r), cell: { userEnteredFormat: { numberFormat: { type: 'NUMBER', pattern: '0.00%' } } }, fields: 'userEnteredFormat.numberFormat' }
     }));
@@ -267,9 +269,15 @@ async function sendEmail({ link, sheetTitle, status, ep, rf, impliedERP, pe, peL
 
 // --------------------------------- 主流程 ---------------------------------
 (async () => {
-  let pe = await getPE_fromJSON() || await getPE_fromHTML() || await getPE_withPlaywrightFallback();
+  // 先用 JSON/HTML；只有在 USE_PLAYWRIGHT='1' 且依然失败时才渲染兜底
+  let pe = await getPE_fromJSON();
+  if (!pe) pe = await getPE_fromHTML();
+  if (!pe && USE_PLAYWRIGHT) pe = await getPE_withPlaywrightFallback();
+
   const rf = await getChina10Y(); // 文本优先；可选渲染兜底；支持 RF_OVERRIDE
+
   if (!pe) console.warn('警告：未从蛋卷拿到 P/E。');
   if (rf == null) console.warn('警告：未能获取 10Y（有知有行）。如需强制覆盖，设置 RF_OVERRIDE=小数（如 0.0178）。');
+
   await writeToExistingWorkbookAndEmail({ pe, rf });
 })().catch(e => { console.error(e); process.exit(1); });
