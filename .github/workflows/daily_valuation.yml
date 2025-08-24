@@ -2,7 +2,7 @@ name: Daily Valuation (10:00 Beijing)
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # GitHub 用 UTC；02:00 UTC = 北京时间 10:00
+    - cron: '0 2 * * *'   # 02:00 UTC = 北京时间 10:00
   workflow_dispatch: {}
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
-      # 只有当你需要 Playwright 兜底时才安装浏览器（提速）
+      # 只有当你想用 Playwright 兜底时才安装浏览器（提速）
       - name: Install Playwright Chromium (optional)
         if: env.USE_PLAYWRIGHT == '1'
         run: npx playwright install chromium --with-deps
@@ -43,12 +43,12 @@ jobs:
           MAIL_TO:   ${{ vars.MAIL_TO }}
           MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
 
-          # 估值参数（允许留空；脚本会回落默认 5.27% / 0.50%）
+          # 估值参数（允许留空；代码中有默认：5.27% / 0.50%）
           ERP_TARGET: ${{ vars.ERP_TARGET }}
           DELTA:      ${{ vars.DELTA }}
           TZ:         Asia/Shanghai
 
           # 性能与稳定性开关
-          USE_PLAYWRIGHT: '0'     # 默认关闭兜底渲染（最快）。抓不到 10Y 时改为 '1'
-          RF_OVERRIDE: ''         # 例如 '0.0178'（小数）。当抓不到 10Y 时使用该值
+          USE_PLAYWRIGHT: '0'     # 默认关闭；需要渲染兜底时改为 '1'
+          RF_OVERRIDE: ''         # 例如 '0.0178'（小数）。抓不到 10Y 时使用该值
         run: node scripts/fetch_pe_and_write_sheet.mjs
