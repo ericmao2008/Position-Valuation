@@ -8,7 +8,27 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 6
+
+    # 统一在 job 级声明 env（脚本读取；此版不启用 Playwright）
+    env:
+      GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+      GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
+      SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
+
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      MAIL_TO:   ${{ vars.MAIL_TO }}
+      MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+
+      ERP_TARGET: ${{ vars.ERP_TARGET }}
+      DELTA:      ${{ vars.DELTA }}
+      TZ:         Asia/Shanghai
+
+      # 固定基线：不启用 Playwright；10Y 兜底 1.78%
+      RF_OVERRIDE: '0.0178'
 
     steps:
       - name: Checkout
@@ -23,27 +43,9 @@ jobs:
       - name: Install deps
         run: npm ci || npm i
 
-      - name: Install Playwright Chromium (optional)
-        if: env.USE_PLAYWRIGHT == '1'
-        run: npx playwright install chromium --with-deps
+      # 不安装 Playwright（基线不需要）
+      # - name: Install Playwright Chromium (optional)
+      #   run: npx playwright install chromium --with-deps
 
       - name: Run fetch & write
-        env:
-          GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-          GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
-          SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
-
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_TO:   ${{ vars.MAIL_TO }}
-          MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
-
-          ERP_TARGET: ${{ vars.ERP_TARGET }}
-          DELTA:      ${{ vars.DELTA }}
-          TZ:         Asia/Shanghai
-
-          USE_PLAYWRIGHT: '1'     # 打开渲染兜底（若文本解析失败则渲染抓）
-          RF_OVERRIDE: '0.0178'   # 最后兜底：仍失败则使用 1.78%
         run: node scripts/fetch_pe_and_write_sheet.mjs
