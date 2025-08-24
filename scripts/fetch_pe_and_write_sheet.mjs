@@ -59,23 +59,19 @@ async function write(range, rows){
   });
 }
 
-// 中国10Y（优先 Investing 主报价；读不到再试有知有行；最后 RF_CN）
+// ---------- r_f ----------
 async function rfCN() {
   dbg("rfCN start (Investing first)");
-
-  // A) Investing 中国10Y 主报价（大号数字）
+  // A) Investing 中国10Y 主报价
   try {
     const url = "https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
     const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
     dbg("rfCN investing status", r.status);
     if (r.ok) {
       const h = await r.text();
-      // ① 明确抓主报价：instrument-price-last>1.789<
       let m = h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i);
-      let v = m ? Number(m[1]) / 100 : null;
+      let v = m ? Number(m[1]) / 100 : null;  // 转小数
       dbg("rfCN instrument-price-last", v);
-
-      // ② 兜底：在“收益率/Yield”附近找百分号
       if (!Number.isFinite(v)) {
         const text = strip(h);
         const near = text.match(/(收益率|Yield)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) ||
@@ -83,13 +79,12 @@ async function rfCN() {
         if (near) v = Number(near[2] || near[1]) / 100;
         dbg("rfCN regex pct near", v);
       }
-
       if (Number.isFinite(v) && v > 0 && v < 1)
         return { v, tag: "真实", link: `=HYPERLINK("${url}","CN 10Y (Investing)")` };
     }
   } catch (e) { dbg("rfCN investing err", e.message); }
 
-  // B) 有知有行（次优）
+  // B) 有知有行
   try {
     const url = "https://youzhiyouxing.cn/data";
     const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 });
@@ -113,10 +108,8 @@ async function rfCN() {
   return { v: RF_CN, tag: "兜底", link: "—" };
 }
 
-// 美国10Y（优先 Investing 主报价；否则在“Yield/收益率”附近取百分比；最后 RF_US）
 async function rfUS() {
   dbg("rfUS start (Investing)");
-
   const urls = [
     "https://cn.investing.com/rates-bonds/u.s.-10-year-bond-yield",
     "https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield"
@@ -126,30 +119,45 @@ async function rfUS() {
       const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
       dbg("rfUS status", url, r.status);
       if (!r.ok) continue;
-
       const h = await r.text();
-      // ① 明确抓主报价：instrument-price-last>4.258<
-      let m = h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i);
-      let v = m ? Number(m[1]) / 100 : null;
-      dbg("rfUS instrument-price-last", v);
-
-      // ② 兜底：在“Yield/收益率”附近找百分号
+      let v = null;
+      const m1 = h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i);
+      if (m1) v = Number(m1[1]) / 100;
       if (!Number.isFinite(v)) {
         const text = strip(h);
-        const near = text.match(/(Yield|收益率)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) ||
-                     text.match(/(\d{1,2}\.\d{1,4})\s*%/);
-        if (near) v = Number(near[2] || near[1]) / 100;
-        dbg("rfUS regex pct near", v);
+        const m2 = text.match(/(Yield|收益率)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) || text.match(/(\d{1,2}\.\d{1,4})\s*%/);
+        if (m2) v = Number(m2[2] || m2[1]) / 100;
       }
-
       if (Number.isFinite(v) && v > 0 && v < 1)
         return { v, tag: "真实", link: `=HYPERLINK("${url}","US 10Y (Investing)")` };
     } catch (e) { dbg("rfUS err", url, e.message); }
   }
-
-  // 兜底
   dbg("rfUS fallback", RF_US);
   return { v: RF_US, tag: "兜底", link: "—" };
+}
+
+// ---------- ERP*(US)：United States 行内 2%~10% 的第一个；失败兜底 4.33% ----------
+async function erpUS(){
+  dbg("erpUS start");
+  try{
+    const url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
+    const r   = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
+    dbg("erpUS status", r.status);
+    if(!r.ok) throw 0;
+
+    const html = await r.text();
+    const row  = html.split(/<\/tr>/i).find(tr => /United\s+States/i.test(tr) || /USA/i.test(tr)) || "";
+    const text = row.replace(/<[^>]+>/g, " ");
+
+    const pcts = [...text.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m => Number(m[1]));
+    dbg("erpUS row pcts", pcts);
+    const candidate = pcts.find(x => x > 2 && x < 10) ?? 4.33;  // 单位：%
+    return { v: candidate/100, tag: "真实", link: `=HYPERLINK("${url}", "Damodaran(US)")` };
+  }catch(e){
+    dbg("erpUS error", e.message);
+  }
+  return { v: 0.0433, tag: "兜底",
+           link: '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
 // ========== Danjuan：HS300 仅用 index-detail/SH000300；SPX 优先 index-detail ==========
