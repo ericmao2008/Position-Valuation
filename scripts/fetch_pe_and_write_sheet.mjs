@@ -1,9 +1,9 @@
-// HS300 + S&P500 —— 两块详表；Playwright 用 page.request 同源 GET /djapi；正文/HTTP 正则兜底；绝不写 0；大量 [DEBUG]
+// HS300 + S&P500 —— 两块详表；Playwright抓“顶部红圈PE”；SPX专用 index-detail/SP500 加固；大量 [DEBUG]
 import fetch from "node-fetch";
 import nodemailer from "nodemailer";
 import { google } from "googleapis";
 
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const USE_PW = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
 const DEBUG  = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
 const TZ     = process.env.TZ || "Asia/Shanghai";
@@ -16,7 +16,7 @@ const todayStr = () => {
 const numOr = (v,d)=>{ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; };
 const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\s\S]*?<\/style>/gi,"").replace(/<[^>]+>/g," ");
 
-// —— 判定参数
+// —— 判定参数（HS300）
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 
@@ -76,6 +76,7 @@ async function rfCN(){
   dbg("rfCN: fallback", RF_CN);
   return { v:RF_CN, tag:"兜底", link:"—" };
 }
+
 async function rfUS(){
   dbg("rfUS: start");
   const urls=["https://cn.investing.com/rates-bonds/u.s.-10-year-bond-yield",
@@ -123,97 +124,122 @@ async function erpUS(){
     link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------------- Danjuan：Playwright page.request 同源 GET /djapi ----------------
-async function readPEWithPageRequest(url, indexCode){
-  const { chromium } = await import("playwright");
-  const br = await chromium.launch({
-    headless:true,
-    args: ['--disable-blink-features=AutomationControlled']
-  });
-  const ctx = await br.newContext({
-    userAgent: UA,
-    locale: 'zh-CN',
-    timezoneId: TZ, // 使用与运行环境一致的时区
-  });
-  const pg = await ctx.newPage();
-
-  // 不等 networkidle，直接到 domcontentloaded
-  await pg.goto(url, { waitUntil:"domcontentloaded" });
-  dbg("PW page.request djapi start", indexCode);
-
-  let v = null;
-  try {
-    const apiUrl = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${indexCode}`;
-    const resp = await pg.request.get(apiUrl, {
-      headers: { "Referer": url, "User-Agent": UA },
-      timeout: 15000
-    });
-    dbg("PW page.request status", resp.status());
-    if (resp.ok()) {
-      const j = await resp.json();
-      v = Number(j?.data?.pe_ttm ?? j?.data?.pe ?? j?.data?.valuation?.pe_ttm) || null;
-      dbg("PW page.request pe", v);
-    }
-  } catch (e) {
-    dbg("PW page.request error", e.message);
+// ---------------- Danjuan：HS300用 valuation-table；SPX专用 index-detail ----------------
+async function peFromValuationPage(code, override){     // 供 HS300 使用
+  const valUrl = `https://danjuanfunds.com/dj-valuation-table-detail/${code}`;
+  // Playwright + page.request 访问 /djapi
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(valUrl, { waitUntil:"domcontentloaded" });
+      // 尝试在同源上下文访问 /djapi
+      const apiUrl = `https://danjuanfunds.com/djapi/index_evaluation/detail?index_code=${code}`;
+      const resp = await pg.request.get(apiUrl, { headers:{ "Referer": valUrl, "User-Agent": UA }, timeout:15000 });
+      dbg("HS300 /djapi status", resp.status());
+      if(resp.ok()){
+        const j=await resp.json();
+        const v=Number(j?.data?.pe_ttm ?? j?.data?.pe ?? j?.data?.valuation?.pe_ttm) || null;
+        dbg("HS300 /djapi pe", v);
+        if(Number.isFinite(v)&&v>0&&v<1000){ await br.close(); return { v, tag:"真实", link:`=HYPERLINK("${valUrl}","Danjuan")` }; }
+      }
+      // 正文兜底
+      const text=await pg.locator('body').innerText().catch(()=> "");
+      dbg("HS300 body len", text?.length || 0);
+      const m=text && text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
+      const v2=m? Number(m[1]) : null;
+      dbg("HS300 body regex", v2);
+      await br.close();
+      if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${valUrl}","Danjuan")` };
+    }catch(e){ dbg("HS300 PW error", e.message); }
   }
-
-  // 再退：正文正则
-  if (!Number.isFinite(v)) {
-    try {
-      const text = await pg.locator("body").innerText();
-      dbg("PW body len", text.length);
-      const m = text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
-      v = m ? Number(m[1]) : null;
-      dbg("PW body regex", v);
-    } catch (e) {
-      dbg("PW body error", e.message);
-    }
-  }
-
-  await br.close();
-  return Number.isFinite(v)&&v>0&&v<1000 ? v : null;
-}
-
-async function readPEHttpFallback(url){
+  // HTTP 源码兜底
   try{
-    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
-    dbg("HTTP fallback status", r.status);
+    const r=await fetch(valUrl,{ headers:{ "User-Agent":UA }, timeout:15000 });
+    dbg("HS300 HTTP status", r.status);
     if(r.ok){
       const h=await r.text();
       const text=strip(h);
       const mTop=text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
-      if(mTop){ const v=Number(mTop[1]); dbg("HTTP regex", v); if(Number.isFinite(v)&&v>0&&v<1000) return v; }
+      if(mTop){ const v=Number(mTop[1]); dbg("HS300 HTTP regex", v); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${valUrl}","Danjuan")` }; }
       const mJson=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
-      if(mJson){ const v=Number(mJson[1]); dbg("HTTP json pe_ttm", v); if(Number.isFinite(v)&&v>0&&v<1000) return v; }
+      if(mJson){ const v=Number(mJson[1]); dbg("HS300 HTTP json", v); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${valUrl}","Danjuan")` }; }
     }
-  }catch(e){ dbg("HTTP fallback err", e.message); }
-  return null;
+  }catch(e){ dbg("HS300 HTTP err", e.message); }
+  if(override!=null) return { v:override, tag:"兜底", link:`=HYPERLINK("${valUrl}","Danjuan")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${valUrl}","Danjuan")` };
 }
 
-async function peFromDanjuan(url, indexCode, override){
-  dbg("peFromDanjuan", url, "USE_PW=", USE_PW);
+// —— SPX 专用：优先 index-detail，再退估值页 —— //
+async function peSPX(){
   if (USE_PW) {
-    const v = await readPEWithPageRequest(url, indexCode);
-    dbg("PW final pe", v);
-    if (v!=null) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
+    try{
+      const { chromium } = await import("playwright");
+      const br = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      const url = "https://danjuanfunds.com/index-detail/SP500";
+      await pg.goto(url, { waitUntil:"domcontentloaded" });
+      // 给前端注入一点时间
+      await pg.waitForTimeout(3000);
+
+      // A) 先抓 body 文本
+      let text = await pg.locator("body").innerText().catch(()=> "");
+      dbg("SPX index-detail body len", text?.length || 0);
+      let m = text && text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
+      if(m){
+        const v = Number(m[1]);
+        await br.close();
+        if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` };
+      }
+
+      // B) DOM 穷举
+      const v2 = await pg.evaluate(()=>{
+        const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
+        for(const el of Array.from(document.querySelectorAll("body *"))){
+          const t=(el.textContent||"").trim();
+          const m=t.match(re);
+          if(m) return parseFloat(m[1]);
+        }
+        return null;
+      });
+      await br.close();
+      if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` };
+    }catch(e){ dbg("SPX index-detail PW error", e.message); }
   }
-  const v2 = await readPEHttpFallback(url);
-  dbg("HTTP final pe", v2);
-  if (v2!=null) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
-  if (override!=null) { dbg("use override", override); return { v:override, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` }; }
-  dbg("no value, return empty");
-  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
+
+  // C) 仍未命中：退回 valuation-table-detail 的 HTTP/JSON
+  const urlVal = "https://danjuanfunds.com/dj-valuation-table-detail/SP500";
+  try{
+    const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:15000 });
+    dbg("SPX valuation HTTP status", r.status);
+    if(r.ok){
+      const h=await r.text();
+      const text=strip(h);
+      let m=text.match(/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i);
+      if(!m) m=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(m){
+        const v=Number(m[1]); dbg("SPX valuation regex/json", v);
+        if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
+      }
+    }
+  }catch(e){ dbg("SPX valuation HTTP err", e.message); }
+
+  // D) 兜底
+  if(PE_OVERRIDE_SPX!=null) return { v:PE_OVERRIDE_SPX, tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
 }
 
-async function peHS300(){ return await peFromDanjuan("https://danjuanfunds.com/dj-valuation-table-detail/SH000300", "SH000300", PE_OVERRIDE_CN); }
-async function peSPX(){   return await peFromDanjuan("https://danjuanfunds.com/dj-valuation-table-detail/SP500",    "SP500",    PE_OVERRIDE_SPX); }
+// —— HS300：沿用估值页 + /djapi + 文本；你这边已成功 —— //
+async function peHS300(){ return await peFromValuationPage("SH000300", PE_OVERRIDE_CN); }
 
 // ---------------- 单块写入 ----------------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle } = await ensureToday();
 
-  const pe = Number(peRes.v);
+  const pe = Number(peRes.v);                 // 抓不到就是 ""，不会是 0
   const rf = Number.isFinite(rfRes.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
 
@@ -255,15 +281,15 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
 
   let row=1;
 
-  // HS300（中国10Y）
+  // HS300（中国10Y + ERP_TARGET_CN）
   const pe_hs = await peHS300();
   const rf_cn = await rfCN();
-  row = await writeBlock(row,"沪深300", pe_hs, rf_cn, null, null, null);  // ERP 取 ERP_TARGET_CN
+  row = await writeBlock(row,"沪深300", pe_hs, rf_cn, null, null, null);
 
   // SPX（美国10Y + ERP(US)）
-  const pe_spx = await peSPX();
   const rf_us  = await rfUS();
   const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
+  const pe_spx = await peSPX();
   row = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link);
 
   console.log("[DONE]", todayStr(), { hs300_pe: pe_hs.v, spx_pe: pe_spx.v });
