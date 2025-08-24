@@ -23,43 +23,45 @@ jobs:
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
 
       # 邮件（可选）
-      SMTP_HOST: ${{ secrets.SMTP_HOST }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      MAIL_TO:   ${{ vars.MAIL_TO }}
-      MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
+      SMTP_HOST:           ${{ secrets.SMTP_HOST }}
+      SMTP_PORT:           ${{ secrets.SMTP_PORT }}
+      SMTP_USER:           ${{ secrets.SMTP_USER }}
+      SMTP_PASS:           ${{ secrets.SMTP_PASS }}
+      MAIL_TO:             ${{ vars.MAIL_TO }}
+      MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
 
       # 判定参数（留空→脚本默认 5.27% / 0.50%）
-      ERP_TARGET: ${{ vars.ERP_TARGET }}
-      DELTA:      ${{ vars.DELTA }}
-      TZ:         Asia/Shanghai
+      ERP_TARGET:          ${{ vars.ERP_TARGET }}
+      DELTA:               ${{ vars.DELTA }}
+      TZ:                  Asia/Shanghai
 
       # 兜底（小数）
-      RF_OVERRIDE: ${{ vars.RF_OVERRIDE }}       # HS300 的中国10Y兜底
-      RF_US:       ${{ vars.RF_US }}
-      RF_DE:       ${{ vars.RF_DE }}
-      RF_JP:       ${{ vars.RF_JP }}
-      RF_AU:       ${{ vars.RF_AU }}
-      RF_IN:       ${{ vars.RF_IN }}
-      RF_VN:       ${{ vars.RF_VN }}
+      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}         # HS300 的中国10Y兜底
+      RF_US:               ${{ vars.RF_US }}
+      RF_DE:               ${{ vars.RF_DE }}
+      RF_JP:               ${{ vars.RF_JP }}
+      RF_AU:               ${{ vars.RF_AU }}
+      RF_IN:               ${{ vars.RF_IN }}
+      RF_VN:               ${{ vars.RF_VN }}
 
-      PE_OVERRIDE:          ${{ vars.PE_OVERRIDE }}           # HS300
-      PE_OVERRIDE_SPX:      ${{ vars.PE_OVERRIDE_SPX }}
-      PE_OVERRIDE_NDX:      ${{ vars.PE_OVERRIDE_NDX }}
-      PE_OVERRIDE_DAX:      ${{ vars.PE_OVERRIDE_DAX }}
-      PE_OVERRIDE_N225:     ${{ vars.PE_OVERRIDE_N225 }}
-      PE_OVERRIDE_ASX200:   ${{ vars.PE_OVERRIDE_ASX200 }}
-      PE_OVERRIDE_NIFTY50:  ${{ vars.PE_OVERRIDE_NIFTY50 }}
-      PE_OVERRIDE_CSIH30533: ${{ vars.PE_OVERRIDE_CSIH30533 }}  # ← 修正：冒号后有空格
+      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}         # HS300
+      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}
+      PE_OVERRIDE_NDX:     ${{ vars.PE_OVERRIDE_NDX }}
+      PE_OVERRIDE_DAX:     ${{ vars.PE_OVERRIDE_DAX }}
+      PE_OVERRIDE_N225:    ${{ vars.PE_OVERRIDE_N225 }}
+      PE_OVERRIDE_ASX200:  ${{ vars.PE_OVERRIDE_ASX200 }}
+      PE_OVERRIDE_NIFTY50: ${{ vars.PE_OVERRIDE_NIFTY50 }}
+      PE_OVERRIDE_CSIH30533: ${{ vars.PE_OVERRIDE_CSIH30533 }}
 
-      # 先设为 0（快且稳），后续要更高“真实抓取”再改为 1
-      USE_PLAYWRIGHT: '0'
+      # 先设为 0（快且稳），需要更高“真实抓取”成功率时再改为 1
+      USE_PLAYWRIGHT:      '0'
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
