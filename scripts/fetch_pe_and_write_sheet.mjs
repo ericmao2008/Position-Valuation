@@ -228,7 +228,7 @@ async function peSPX(){
 
 async function peHS300(){ return await peFromValuationPage("SH000300", PE_OVERRIDE_CN); }
 
-// ---------------- 单块写入（含：E/P、r_f、隐含ERP → 百分比显示） ----------------
+// ---------------- 单块写入（把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ 统一显示为百分比） ----------------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle, sheetId } = await ensureToday();
 
@@ -267,7 +267,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // （新增）把 E/P、r_f、隐含ERP 的 B 列设置为百分比 0.00%
+  // 将 B 列第 4~8 行（E/P、r_f、隐含ERP、目标ERP*、容忍带δ）统一设置为百分比 0.00%
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
@@ -276,9 +276,9 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
           repeatCell: {
             range: {
               sheetId,
-              startRowIndex: (startRow - 1) + 3, // 第 4 行（E/P）
-              endRowIndex:   (startRow - 1) + 6, // 第 6 行（隐含ERP）之后不含
-              startColumnIndex: 1,               // B 列
+              startRowIndex: (startRow - 1) + 3,  // 第4行（E/P）
+              endRowIndex:   (startRow - 1) + 8,  // 到第8行（容忍带δ）之后不含
+              startColumnIndex: 1,                // B 列
               endColumnIndex:   2
             },
             cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
