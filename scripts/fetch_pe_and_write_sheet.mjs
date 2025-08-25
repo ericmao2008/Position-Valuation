@@ -1,8 +1,11 @@
 /**
  * Version History
- * V2.9.4 - UI Polish
- * - Modified the '判定' (Judgment) field in `writeBlock` to only show the emoji (🟢, 🔴, 🟡) 
- * and remove the descriptive text, as requested. This affects both the sheet and email summary.
+ * V2.9.5 - Feature Expansion: Added NDX, DAX, India Indices
+ * - Added Nasdaq 100, Germany DAX, and MSCI India to the VC_TARGETS.
+ * - Created new functions (rfDE, rfIN, erpDE, erpIN) to fetch bond yields and ERPs for Germany and India.
+ * - Updated the Main block to process, write, and report on all 8 indices.
+ * - Refined `writeBlock` to handle labels for different countries.
+ * - Added new PE_OVERRIDE environment variables for the new indices.
  */
 
 import fetch from "node-fetch";
@@ -21,10 +24,13 @@ const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=130010014
 
 // 目标指数
 const VC_TARGETS = {
-  SH000300: { name: "沪深300", code: "SH000300" },
-  SP500:    { name: "标普500", code: "SP500" },
-  CSIH30533:{ name: "中概互联50", code: "CSIH30533" },
-  HSTECH:   { name: "恒生科技", code: "HKHSTECH" }
+  SH000300: { name: "沪深300", code: "SH000300", country: "CN" },
+  SP500:    { name: "标普500", code: "SP500", country: "US" },
+  CSIH30533:{ name: "中概互联50", code: "CSIH30533", country: "CN" },
+  HSTECH:   { name: "恒生科技", code: "HKHSTECH", country: "CN" },
+  NDX:      { name: "纳指100", code: "NDX", country: "US" },
+  GDAXI:    { name: "德国DAX", code: "GDAXI", country: "DE" },
+  "935600": { name: "MSCI印度", code: "935600", country: "IN" },
 };
 
 // ===== Policy / Defaults =====
@@ -32,14 +38,19 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
-const RF_US = numOr(process.env.RF_US,       0.0425);
-const RF_JP = numOr(process.env.RF_JP,       0.0100);
+const RF_CN = numOr(process.env.RF_CN, 0.023); // 兜底-中国
+const RF_US = numOr(process.env.RF_US, 0.0425); // 兜底-美国
+const RF_JP = numOr(process.env.RF_JP, 0.0100); // 兜底-日本
+const RF_DE = numOr(process.env.RF_DE, 0.025); // 兜底-德国
+const RF_IN = numOr(process.env.RF_IN, 0.07);  // 兜底-印度
 
-const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();           return s?Number(s):null; })();
-const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();       return s?Number(s):null; })();
-const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim();      return s?Number(s):null; })();
-const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
+const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE_CN??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_NDX     = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_DAX     = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_IN      = (()=>{ const s=(process.env.PE_OVERRIDE_IN??"").trim(); return s?Number(s):null; })();
 const ROE_JP = numOr(process.env.ROE_JP, null);
 
 // ===== Sheets =====
@@ -90,6 +101,7 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
+// ===== Value Center：Playwright DOM（适配最终版DIV布局）=====
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -127,13 +139,9 @@ async function fetchVCMapDOM(){
             if (dataRow) {
                 const peEl = dataRow.querySelector('.pe');
                 const roeEl = dataRow.querySelector('.roe');
-
                 const pe = toNum(peEl ? peEl.textContent : null);
                 const roe = pct2d(roeEl ? roeEl.textContent : null);
-                
-                if(pe && pe > 0) {
-                    out[code] = { pe, roe };
-                }
+                if(pe && pe > 0) out[code] = { pe, roe };
             }
         }
     }
@@ -154,18 +162,15 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
+// ===== r_f / ERP* =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const plain = h.replace(/<[^>]+>/g," ");
-      const near  = plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/china-10-year-bond-yield","CN 10Y")' };
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","CN 10Y")` };
   }}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
 async function rfUS(){ try{
   const url="https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield";
@@ -173,12 +178,8 @@ async function rfUS(){ try{
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const plain=h.replace(/<[^>]+>/g," ");
-      const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield","US 10Y")' };
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","US 10Y")` };
   }}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
 async function rfJP(){ try{
   const url="https://cn.investing.com/rates-bonds/japan-10-year-bond-yield";
@@ -186,13 +187,27 @@ async function rfJP(){ try{
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const plain=h.replace(/<[^>]+>/g," ");
-      const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/japan-10-year-bond-yield","JP 10Y")' };
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","JP 10Y")` };
   }}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
+async function rfDE(){ try{
+  const url="https://www.investing.com/rates-bonds/germany-10-year-bond-yield";
+  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
+  if(r.ok){
+    const h=await r.text(); let v=null;
+    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","DE 10Y")` };
+  }}catch{} return { v:RF_DE, tag:"兜底", link:"—" }; }
+async function rfIN(){ try{
+  const url="https://cn.investing.com/rates-bonds/india-10-year-bond-yield";
+  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
+  if(r.ok){
+    const h=await r.text(); let v=null;
+    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","IN 10Y")` };
+  }}catch{} return { v:RF_IN, tag:"兜底", link:"—" }; }
 
 async function erpFromDamodaran(re){
   try{
@@ -213,6 +228,8 @@ async function erpFromDamodaran(re){
 async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
 async function peNikkei(){
   const { chromium } = await import("playwright");
@@ -238,35 +255,30 @@ async function peNikkei(){
 }
 
 // ===== 写块 & 判定 =====
-async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
+async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
-  let target = erpStar;
-  if(label.includes("沪深") || label.includes("中概") || label.includes("恒生")) target = ERP_TARGET_CN;
   const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;
   const ep = Number.isFinite(pe) ? 1/pe : null;
   const factor = (roe!=null && roe>0) ? (roe/ROE_BASE) : 1;
   const factorDisp = (roe!=null && roe>0) ? Number(factor.toFixed(2)) : "";
-  const peBuy  = (rf!=null && target!=null) ? Number((1/(rf+target+DELTA)*factor).toFixed(2)) : null;
-  const peSell = (rf!=null && target!=null && (rf+target-DELTA)>0) ? Number((1/(rf+target-DELTA)*factor).toFixed(2)) : null;
+  const peBuy  = (rf!=null && erpStar!=null) ? Number((1/(rf+erpStar+DELTA)*factor).toFixed(2)) : null;
+  const peSell = (rf!=null && erpStar!=null && (rf+erpStar-DELTA)>0) ? Number((1/(rf+erpStar-DELTA)*factor).toFixed(2)) : null;
   const fairRange = (peBuy!=null && peSell!=null) ? `${peBuy} ~ ${peSell}` : "";
-  
   let status="需手动更新";
   if(Number.isFinite(pe) && peBuy!=null && peSell!=null){
-    // --- CORRECTED: Keep only Emoji ---
     if (pe <= peBuy) status="🟢";
     else if (pe >= peSell) status="🔴";
     else status="🟡";
-    // --- END CORRECTION ---
   }
-
+  const rfLabel = `${country} 10Y`;
   const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
-    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label.includes("沪深")||label.includes("中概")||label.includes("恒生") ? "CN 10Y":"US/JP 10Y"), rfRes?.link || "—"],
-    ["目标 ERP*", (Number.isFinite(target)?target:""), (Number.isFinite(target)?"真实":"兜底"), "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
+    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", rfLabel, rfRes?.link || "—"],
+    ["目标 ERP*", (Number.isFinite(erpStar)?erpStar:""), (Number.isFinite(erpStar)?"真实":"兜底"), "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）","—"],
     ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点=1/(r_f+ERP*+δ)×factor","—"],
     ["卖点PE下限（含ROE因子）", peSell ?? "", (peSell!=null)?"真实":"兜底", "卖点=1/(r_f+ERP*−δ)×factor","—"],
@@ -340,12 +352,16 @@ async function sendEmailIfEnabled(lines){
   const pe_nk_promise = peNikkei();
   const rf_jp_promise = rfJP();
   const erp_jp_promise = erpJP();
+  const rf_de_promise = rfDE();
+  const erp_de_promise = erpDE();
+  const rf_in_promise = rfIN();
+  const erp_in_promise = erpIN();
 
   // 1) HS300
   let r_hs = vcMap["SH000300"];
   let pe_hs = r_hs?.pe ? { v: r_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   let roe_hs = r_hs?.roe ? { v: r_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hs = await writeBlock(row, VC_TARGETS.SH000300.name, pe_hs, await rf_cn_promise, ERP_TARGET_CN, "真实", null, roe_hs);
+  let res_hs = await writeBlock(row, VC_TARGETS.SH000300.name, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
   row = res_hs.nextRow;
 
   // 2) SP500
@@ -353,32 +369,56 @@ async function sendEmailIfEnabled(lines){
   let pe_spx = r_sp?.pe ? { v: r_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
   let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   const erp_us = await erp_us_promise;
-  let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
+  let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
   row = res_sp.nextRow;
+  
+  // 3) 纳指100
+  let r_ndx = vcMap["NDX"];
+  let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
+  let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
+  let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
+  row = res_ndx.nextRow;
 
-  // 3) Nikkei
+  // 4) Nikkei
   let roe_nk = (ROE_JP!=null) ? { v:ROE_JP, tag:"覆写", link:"—" } : { v:null, tag:"兜底", link:"—" };
   const erp_jp = await erp_jp_promise;
-  let res_nk = await writeBlock(row, "日经指数", await pe_nk_promise, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
+  let res_nk = await writeBlock(row, "日经指数", "JP", await pe_nk_promise, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
   row = res_nk.nextRow;
 
-  // 4) 中概互联网50
+  // 5) 中概互联50
   let r_cx = vcMap["CSIH30533"];
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   const erp_cn = await erp_cn_promise;
-  let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
+  let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
   row = res_cx.nextRow;
 
-  // 5) 恒生科技
+  // 6) 恒生科技
   let r_hst = vcMap["HSTECH"];
   let pe_hst = r_hst?.pe ? { v: r_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
+  let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, "CN", pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
   row = res_hst.nextRow;
+
+  // 7) 德国DAX
+  let r_dax = vcMap["GDAXI"];
+  let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
+  let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
+  const erp_de = await erp_de_promise;
+  let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
+  row = res_dax.nextRow;
+
+  // 8) MSCI印度
+  let r_in = vcMap["935600"];
+  let pe_in = r_in?.pe ? { v: r_in.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_IN??"", tag:"兜底", link:"—" };
+  let roe_in = r_in?.roe ? { v: r_in.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
+  const erp_in = await erp_in_promise;
+  let res_in = await writeBlock(row, VC_TARGETS["935600"].name, "IN", pe_in, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_in);
+  row = res_in.nextRow;
   
   console.log("[DONE]", todayStr(), {
-    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, nikkei_pe: res_nk.pe, cxin_pe: res_cx.pe, hstech_pe: res_hst.pe
+    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
+    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, in_pe: res_in.pe
   });
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
@@ -386,9 +426,12 @@ async function sendEmailIfEnabled(lines){
   const lines = [
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
+    `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
     `Nikkei PE: ${res_nk.pe ?? "-"} ${roeFmt(res_nk.roe)}→ ${res_nk.judgment ?? "-"}`,
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
-    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`
+    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
+    `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
+    `MSCI India PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`
   ];
   await sendEmailIfEnabled(lines);
 })();
