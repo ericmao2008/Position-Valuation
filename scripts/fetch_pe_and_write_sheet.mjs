@@ -1,15 +1,19 @@
 /**
  * Version History
+ * V2.6.3
+ *  - 简化：只保留“方案B：ROE倍数因子”后的单套阈值（中枢/买点/卖点/区间）
+ *  - 新增：ROE倍数因子 = ROE / ROE_BASE；“说明（公式）”写清计算原理
+ *  - 判定：改为以“ROE因子后的阈值”直接比较当前P/E
+ *  - 视觉：保留分块加粗灰底与外框；避免任何 P/E 被设为百分比
+ *
  * V2.6.2
- *  - 修复：去除多余的 “P/E (TTM)” 行；每分块仅一条
- *  - 样式：为每个分块增加视觉区隔（“指数”行加粗+浅灰底、分块外框）
- *  - 功能：在原始阈值之外，新增 4 条 “ROE 因子后” 阈值（中枢/买点/卖点/区间）
+ *  - 去除重复 P/E；区隔样式；曾并行显示“原始阈值”和“ROE因子阈值”
  *
- * V2.6.1 (hotfix)
- *  - 百分比格式范围修正，避免 P/E 被设成百分比；ROE(TTM) 抓取增强
+ * V2.6.1
+ *  - 百分比格式修正；ROE(TTM) 抓取增强
  *
- * V2.6 (Plan B)
- *  - 合理PE（ROE因子） = 1/(r_f+ERP*) × (ROE/ROE_BASE)
+ * V2.6
+ *  - 方案B：合理PE（ROE因子） = 1/(r_f+ERP*) × (ROE/ROE_BASE)
  *
  * V2.5
  *  - 中概互联网：r_f=中国10Y；ERP*=China
@@ -141,7 +145,7 @@ async function rfUS() {
       }
       if (Number.isFinite(v) && v > 0 && v < 1)
         return { v, tag: "真实", link: `=HYPERLINK("${url}","US 10Y (Investing)")` };
-    } catch (e) { dbg("rfUS err", url, e.message); }
+    } catch (e) { dbg("rfUS err", e.message); }
   }
   dbg("rfUS fallback", RF_US);
   return { v: RF_US, tag: "兜底", link: "—" };
@@ -180,6 +184,7 @@ async function erpFromDamodaran(countryRegex, fallbackPct){
     dbg("erp* status", r.status);
     if(!r.ok) throw new Error("status not ok");
     const html = await r.text();
+
     const row  = html.split(/<\/tr>/i).find(tr => new RegExp(countryRegex, "i").test(tr)) || "";
     const text = row.replace(/<[^>]+>/g, " ");
     const pcts = [...text.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m => Number(m[1]));
@@ -196,7 +201,7 @@ async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433);
 async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 async function erpCN(){  return erpFromDamodaran("^\\s*China\\s*$|China", 0.0527); }
 
-// ========== Danjuan：PE 抓取 ==========
+// ========== Danjuan：PE 抓取（与 V2.6.2 同，略小改确保稳定） ==========
 async function peHS300(){
   const url = "https://danjuanfunds.com/index-detail/SH000300";
 
@@ -259,7 +264,6 @@ async function peHS300(){
 }
 
 async function peSPX(){
-  // 优先 index-detail/SP500；回退估值页
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -311,6 +315,7 @@ async function peSPX(){
 
 async function peNikkei(){
   const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
+
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -381,7 +386,6 @@ async function peChinaInternet(){
         const v = Number(m[1]); await br.close();
         if(Number.isFinite(v) && v>0 && v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
       }
-
       const v2 = await pg.evaluate(()=>{
         const isBad = (t)=> /分位|百分位|%/.test(t);
         const reNum = /(\d{1,3}\.\d{1,2})/;
@@ -404,7 +408,8 @@ async function peChinaInternet(){
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
     dbg("CSIH30533 HTTP status", r.status);
     if(r.ok){
-      const h=await r.text(); const text=strip(h);
+      const h=await r.text();
+      const text=strip(h);
 
       let m = text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if(m){
@@ -416,16 +421,6 @@ async function peChinaInternet(){
         const v=Number(mJson[1]);
         if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
       }
-      const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-      for(const line of lines){
-        if(/PE\b/i.test(line) && !/分位|百分位/.test(line)){
-          const mm = line.match(/(\d{1,3}\.\d{1,2})/);
-          if(mm){
-            const v=Number(mm[1]);
-            if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
-          }
-        }
-      }
     }
   }catch(e){ dbg("CSIH30533 HTTP error", e.message); }
 
@@ -435,7 +430,7 @@ async function peChinaInternet(){
 
 // ========== ROE(TTM) 抓取 ==========
 async function roeFromDanjuan(urls){
-  // Playwright 优先
+  // Playwright 优先（如可用）
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -482,7 +477,7 @@ async function roeHS300(){ return roeFromDanjuan(["https://danjuanfunds.com/inde
 async function roeSPX(){  return roeFromDanjuan(["https://danjuanfunds.com/dj-valuation-table-detail/SP500","https://danjuanfunds.com/index-detail/SP500"]); }
 async function roeCXIN(){ return roeFromDanjuan(["https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533"]); }
 
-// ---------- 写单块（含 δ→P/E 三阈值 + ROE 因子修正 & 视觉区隔） ----------
+// ---------- 写单块（仅保留“ROE因子后”的单套阈值 & 视觉区隔） ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
 
@@ -492,120 +487,99 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;    // 小数
 
   const ep = Number.isFinite(pe) ? 1/pe : null;
-  const implied = (ep!=null && Number.isFinite(rf)) ? (ep - rf) : null;
-  const peLimit = (Number.isFinite(rf) && Number.isFinite(target)) ? Number((1/(rf+target)).toFixed(2)) : null;
+  const implied = (ep!=null && Number.isFinite(rf)) ? (ep - rf) : null; // 供参考，不用于最终判定
+  const peLimitBase = (Number.isFinite(rf) && Number.isFinite(target)) ? (1/(rf+target)) : null;
+  const buyUpperBase = (Number.isFinite(rf) && Number.isFinite(target)) ? (1/(rf+target+DELTA)) : null;
+  const sellLowerBase = (Number.isFinite(rf) && Number.isFinite(target) && (rf+target-DELTA)>0) ? (1/(rf+target-DELTA)) : null;
 
-  const denomBuy  = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target + DELTA) : null;
-  const denomSell = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target - DELTA) : null;
-  const peBuyUpper  = (denomBuy  != null && denomBuy  > 0) ? Number((1/denomBuy ).toFixed(2)) : null;
-  const peSellLower = (denomSell != null && denomSell > 0) ? Number((1/denomSell).toFixed(2)) : null;
+  // ROE 因子
+  const factor = (roe!=null && roe>0) ? (roe/ROE_BASE) : 1;
+  const factorDisp = (roe!=null && roe>0) ? Number((factor).toFixed(2)) : "";
 
-  // 方案B：在“原始阈值”基础上乘以 ROE 因子
-  const factor = (roe!=null && roe>0) ? (roe / ROE_BASE) : null;
-  const peLimitRoe     = (peLimit!=null     && factor!=null) ? Number((peLimit    * factor).toFixed(2)) : null;
-  const peBuyUpperRoe  = (peBuyUpper!=null  && factor!=null) ? Number((peBuyUpper * factor).toFixed(2)) : null;
-  const peSellLowerRoe = (peSellLower!=null && factor!=null) ? Number((peSellLower* factor).toFixed(2)) : null;
+  // 只保留“因子后”的阈值（保留两位小数显示）
+  const peLimit   = (peLimitBase  !=null) ? Number((peLimitBase  * factor).toFixed(2)) : null;
+  const buyUpper  = (buyUpperBase !=null) ? Number((buyUpperBase * factor).toFixed(2)) : null;
+  const sellLower = (sellLowerBase!=null) ? Number((sellLowerBase* factor).toFixed(2)) : null;
+  const fairRange = (buyUpper!=null && sellLower!=null) ? `${buyUpper} ~ ${sellLower}` : "";
 
-  const fairRangeBase = (peBuyUpper!=null && peSellLower!=null) ? `${peBuyUpper} ~ ${peSellLower}` : "";
-  const fairRangeRoe  = (peBuyUpperRoe!=null && peSellLowerRoe!=null) ? `${peBuyUpperRoe} ~ ${peSellLowerRoe}` : "";
-
+  // 判定：完全以“因子后”阈值为准
   let status="需手动更新";
-  if (implied!=null && Number.isFinite(target)) {
-    if (implied >= target + DELTA) status="🟢 买点（低估）";
-    else if (implied <= target - DELTA) status="🔴 卖点（高估）";
+  if (Number.isFinite(pe) && buyUpper!=null && sellLower!=null) {
+    if (pe <= buyUpper) status="🟢 买点（低估）";
+    else if (pe >= sellLower) status="🔴 卖点（高估）";
     else status="🟡 持有（合理）";
   }
 
-  // —— 内容行（确保只有一个 “P/E（TTM）”）——
+  // —— 内容行（简化版）——
   const rows = [
-    ["字段","数值","数据","说明","数据源"],                                         // 1
-    ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],              // 2（加粗+底色）
-    ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"], // 3
-    ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],            // 4
-    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label==="沪深300"?"有知有行 10Y":"Investing.com 10Y"), rfRes?.link || "—"], //5
-    ["隐含ERP = E/P − r_f", implied ?? "", (implied!=null)?"真实":"兜底", "市场给予的风险补偿（小数，显示为百分比）","—"],      // 6
+    ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
+    ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
+    ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
+    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label==="沪深300"?"有知有行 10Y":"Investing.com 10Y"), rfRes?.link || "—"],
     ["目标 ERP*", (label==="沪深300"? ERP_TARGET_CN : (Number.isFinite(target)?target:"")), (label==="沪深300"?"真实":(Number.isFinite(target)?"真实":"兜底")),
-      (label==="沪深300"?"建议参考达摩达兰":"达摩达兰"), erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'], //7
-    ["容忍带 δ", DELTA, "真实", "减少频繁切换","—"],                                   // 8
-    // —— 原始阈值（基线）——
-    ["对应P/E上限 = 1/(r_f + ERP*)", peLimit ?? "", (peLimit!=null)?"真实":"兜底", "直观对照（中枢，未含ROE因子）","—"], // 9
-    ["买点PE上限 = 1/(r_f + ERP* + δ)", peBuyUpper ?? "", (peBuyUpper!=null)?"真实":"兜底", "低估买点阈值（未含ROE因子）","—"],    // 10
-    ["卖点PE下限 = 1/(r_f + ERP* − δ)", peSellLower ?? "", (peSellLower!=null)?"真实":"兜底", "高估卖点阈值（未含ROE因子）","—"], // 11
-    ["合理PE区间（买点上限 ~ 卖点下限）", fairRangeBase, (peBuyUpper!=null && peSellLower!=null)?"真实":"兜底", "合理区间（未含ROE因子）","—"], // 12
-    // —— ROE 信息与“合理PE（ROE因子）”——
-    ["ROE（TTM）", roe ?? "", (roe!=null)?"真实":"兜底", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],   // 13
-    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],         // 14
-    ["合理PE（ROE因子） = 上一行 × (ROE/基准)", (peLimitRoe ?? ""), (peLimitRoe!=null)?"真实":"兜底", "中枢经 ROE 因子修正","—"], // 15
-    // —— ROE 因子后的阈值（你的诉求）——
-    ["对应P/E上限（ROE因子）", peLimitRoe ?? "", (peLimitRoe!=null)?"真实":"兜底", "直观对照（中枢，含ROE因子）","—"], // 16
-    ["买点PE上限（ROE因子）", peBuyUpperRoe ?? "", (peBuyUpperRoe!=null)?"真实":"兜底", "低估买点阈值（含ROE因子）","—"],      // 17
-    ["卖点PE下限（ROE因子）", peSellLowerRoe ?? "", (peSellLowerRoe!=null)?"真实":"兜底", "高估卖点阈值（含ROE因子）","—"],    // 18
-    ["合理PE区间（ROE因子）", fairRangeRoe, (peBuyUpperRoe!=null && peSellLowerRoe!=null)?"真实":"兜底", "合理区间（含ROE因子）","—"], // 19
-    ["判定", status, (implied!=null && Number.isFinite(target))?"真实":"兜底", "买点/持有/卖点/需手动","—"],        // 20
+      (label==="沪深300"?"建议参考达摩达兰":"达摩达兰"), erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
+    ["容忍带 δ", DELTA, "真实", "减少频繁切换","—"],
+    // —— 仅展示“因子后”阈值 ——
+    ["对应P/E上限（含ROE因子）", peLimit ?? "", (peLimit!=null)?"真实":"兜底", "中枢：1/(r_f+ERP*)×(ROE/ROE_base)","—"],
+    ["买点PE上限（含ROE因子）", buyUpper ?? "", (buyUpper!=null)?"真实":"兜底", "买点：1/(r_f+ERP*+δ)×factor","—"],
+    ["卖点PE下限（含ROE因子）", sellLower ?? "", (sellLower!=null)?"真实":"兜底", "卖点：1/(r_f+ERP*−δ)×factor","—"],
+    ["合理PE区间（含ROE因子）", fairRange, (buyUpper!=null && sellLower!=null)?"真实":"兜底", "买点上限 ~ 卖点下限","—"],
+    // —— ROE & 因子与公式说明 ——
+    ["ROE（TTM）", roe ?? "", (roe!=null)?"真实":"兜底", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
+    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],
+    ["ROE倍数因子 = ROE/ROE基准", factorDisp, (factorDisp!=="")?"真实":"兜底", "例如 16.4%/12% = 1.36","—"],
+    ["说明（公式）", "见右", "真实", "PE_limit = 1/(r_f+ERP*)×(ROE/ROE_base); 买点=1/(r_f+ERP*+δ)×factor; 卖点=1/(r_f+ERP*−δ)×factor","—"],
+    ["判定", status, (Number.isFinite(pe) && buyUpper!=null && sellLower!=null)?"真实":"兜底", "按含ROE因子的阈值判断","—"],
   ];
 
   // 写入
   const end = startRow + rows.length - 1;
-  await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+  await write(`'${sheetTitle}'!A${startRow}:E${end}`, [["字段","数值","数据","说明","数据源"], ...rows]);
 
   // —— 单元格格式化 —— 
-  // 百分比：E/P(4), r_f(5), 隐含ERP(6), ERP*(7), δ(8), ROE(13), ROE基准(14)
-  const pctRows = [4,5,6,7,8,13,14].map(off => (startRow - 1) + (off - 1));
-  // 普通数字：P/E(3)、所有“PE阈值/区间/合理PE(ROE因子)”（9~12、15~19）
-  const numberRows = [3,9,10,11,12,15,16,17,18,19].map(off => (startRow - 1) + (off - 1));
-
-  const requests = [
-    ...pctRows.map(r => ({
-      repeatCell: {
-        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
-        fields: "userEnteredFormat.numberFormat"
-      }
-    })),
-    ...numberRows.map(r => ({
-      repeatCell: {
-        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
-        fields: "userEnteredFormat.numberFormat"
-      }
-    })),
-    // 视觉区隔：给“指数”行（第2行）加粗+浅灰背景
-    {
-      repeatCell: {
-        range: {
-          sheetId,
-          startRowIndex: (startRow - 1) + 1, // 第2行 0-based
-          endRowIndex:   (startRow - 1) + 2,
-          startColumnIndex: 0,
-          endColumnIndex:   5
-        },
-        cell: {
-          userEnteredFormat: {
-            backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 },
-            textFormat: { bold: true }
+  // 百分比：E/P、r_f、ERP*、δ、ROE、ROE基准
+  const hdr = 1; // 标题行偏移
+  const pctRows = [hdr+2, hdr+3, hdr+5, hdr+6, hdr+10, hdr+11]; // 1-based相对：E/P(3), r_f(4), ERP*(6), δ(7), ROE(11), ROE基准(12)
+  const numberRows = [hdr+1, hdr+7, hdr+8, hdr+9, hdr+12]; // P/E、三阈值与因子数值行
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        ...pctRows.map(i => ({
+          repeatCell: {
+            range: { sheetId, startRowIndex:(startRow-1)+i-1, endRowIndex:(startRow-1)+i, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
+        })),
+        ...numberRows.map(i => ({
+          repeatCell: {
+            range: { sheetId, startRowIndex:(startRow-1)+i-1, endRowIndex:(startRow-1)+i, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
+        })),
+        // 视觉区隔：给“指数”行加粗+浅灰背景（在数据区第2行=总体第 startRow+1）
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex:(startRow-1)+1, endRowIndex:(startRow-1)+2, startColumnIndex:0, endColumnIndex:5 },
+            cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+            fields: "userEnteredFormat(backgroundColor,textFormat)"
           }
         },
-        fields: "userEnteredFormat(backgroundColor,textFormat)"
-      }
-    },
-    // 分块外框
-    {
-      updateBorders: {
-        range: {
-          sheetId,
-          startRowIndex: (startRow - 1),
-          endRowIndex:   end,
-          startColumnIndex: 0,
-          endColumnIndex:   5
-        },
-        top:    { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
-        bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
-        left:   { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
-        right:  { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }
-      }
+        // 分块外框
+        {
+          updateBorders: {
+            range: { sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
+            top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } }
+          }
+        }
+      ]
     }
-  ];
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+  });
 
   return end + 2; // 分块之间留 1 行空白
 }
@@ -633,7 +607,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const pe_nk = await peNikkei();
   const rf_jp = await rfJP();
   const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
-  row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, null); // 暂无 ROE
+  row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, null); // 暂无 ROE → factor=1
 
   // 4) 中概互联网（CSIH30533：中国10Y + ERP(China)）
   const pe_cxin = await peChinaInternet();
