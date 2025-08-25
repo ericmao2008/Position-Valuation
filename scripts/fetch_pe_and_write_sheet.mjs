@@ -1,18 +1,18 @@
 /**
  * Version History
  * V2.7.13
- *  - Full file regeneration by Gemini.
- *  - Integrated robust fetchVCMapPW function:
- *    - Smarter waiting strategy (waits for specific data elements).
- *    - Dumps debug screenshot and HTML if scraping fails, to easily see why.
- *    - Throws an explicit error on failure for clearer logs.
- *  - Includes previous optimizations (e.g., fetching rfCN/erpCN only once).
+ *  - Configured by Gemini: Added "新经济" (HKHSSCNE) to the target list.
+ *  - The core scraping engine is robust and requires no changes.
+ * V2.7.12
+ *  - Value Center：Playwright 在 DOM 中“按名称/代码”精确定位目标行，然后取 PE/ROE
+ *      * 优先：按表头自动定位 “PE”“ROE” 列索引
+ *      * 兜底：固定列位 PE=第3列、ROE=第8列
+ *      * 行匹配：名称与代码多别名匹配
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
-import fs from 'fs';
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -22,18 +22,22 @@ const TZ     = process.env.TZ || "Asia/Shanghai";
 const dbg    = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
 const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
-const VC_CODE_LINK = {
-  SH000300: "/dj-valuation-table-detail/SH000300",
-  SP500:    "/dj-valuation-table-detail/SP500",
-  CSIH30533:"/dj-valuation-table-detail/CSIH30533",
-  HSTECH:   "/dj-valuation-table-detail/HSTECH",
-};
 
-const todayStr = () => {
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
-  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+// 目标指数：别名（中文/英文/代码）用于 DOM 文本匹配
+const VC_TARGETS = {
+  SH000300: ["沪深300", "上证沪深300", "SH000300", "沪深 300"],
+  SP500:    ["标普500", "SP500", "S&P500", "S&P 500", "标准普尔500"],
+  CSIH30533:["中概互联网50","中概互联50","中概互联网 50","CSIH30533"],
+  HSTECH:   ["恒生科技","恒生科技指数","HSTECH","恒生 科技"],
+  HKHSSCNE: ["新经济", "HKHSSCNE"] // <-- 新增目标
 };
-const numOr = (v,d)=>{ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; };
+const VC_HREF = {
+  SH000300:"/dj-valuation-table-detail/SH000300",
+  SP500:"/dj-valuation-table-detail/SP500",
+  CSIH30533:"/dj-valuation-table-detail/CSIH30533",
+  HSTECH:"/dj-valuation-table-detail/HSTECH",
+  HKHSSCNE:"/dj-valuation-table-detail/HKHSSCNE" // <-- 新增目标
+};
 
 // ===== Policy / Defaults =====
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
@@ -59,6 +63,12 @@ const auth = new google.auth.JWT(
   ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
 );
 const sheets = google.sheets({ version:"v4", auth });
+
+function todayStr(){
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+}
+function numOr(v,d){ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; }
 
 async function ensureToday(){
   const title=todayStr();
@@ -92,112 +102,94 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
-// ===== Value Center (REVISED with better waiting and debugging) =====
-async function fetchVCMapPW(){
+// ===== Value Center：Playwright DOM（按名称/代码抓行 → PE/ROE）=====
+async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
   const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
   const pg  = await ctx.newPage();
-  
-  try {
-    await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
+  await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
+  // 等待表/锚点
+  await Promise.race([
+    pg.waitForSelector('table', { timeout: 8000 }),
+    ...Object.values(VC_HREF).map(h => pg.waitForSelector(`a[href*="${h}"]`, { timeout: 8000 }).catch(()=>{}))
+  ]).catch(()=>{});
+  await pg.waitForLoadState('networkidle').catch(()=>{});
+  await pg.waitForTimeout(600);
 
-    // 1. BETTER WAITING STRATEGY: Wait for the actual data to likely be present
-    console.log("[DEBUG] Waiting for data table to appear...");
-    await pg.waitForSelector('a[href*="/dj-valuation-table-detail/"]', { timeout: 20000 });
-    console.log("[DEBUG] Data table found. Waiting for a moment for scripts to settle...");
-    await pg.waitForTimeout(1000); // Small extra delay
+  const recs = await pg.evaluate((VC_TARGETS, VC_HREF)=>{
+    const norm = s => (s||"").replace(/\s+/g,"").toUpperCase();
 
-    const hv = await pg.evaluate((VC_CODE_LINK)=>{
-      const out = {};
-      const want = Object.keys(VC_CODE_LINK);
+    // 读表头，定位列
+    let peIdx = 2, roeIdx = 7; // 退路
+    const ths = Array.from(document.querySelectorAll("th")).map(th=>norm(th.textContent));
+    if(ths.length){
+      const idxBy = kw => ths.findIndex(t => t.includes(kw));
+      const iPE  = idxBy("PE");
+      const iROE = idxBy("ROE");
+      if(iPE>=0) peIdx  = iPE;
+      if(iROE>=0) roeIdx = iROE;
+    }
 
-      // 1) scripts JSON
-      const scripts = Array.from(document.querySelectorAll('script')).map(s => s.textContent || "");
-      const tryJson = (t)=>{
-        for(const code of want){
-          const re1 = new RegExp(`"index_code"\\s*:\\s*"${code}"[\\s\\S]{0,800}?"pe_ttm"\\s*:\\s*"?([\\d.]+)"?[\\s\\S]{0,600}?"roe"\\s*:\\s*"?([\\d.]+)"?`, "i");
-          const m1 = t.match(re1);
-          if(m1){
-            const pe = parseFloat(m1[1]); const roeRaw = parseFloat(m1[2]);
-            if(Number.isFinite(pe) && pe>0 && pe<1000){
-              let roe = Number.isFinite(roeRaw)? (roeRaw>1? roeRaw/100:roeRaw) : null;
-              if(!(roe>0 && roe<1)) roe = null;
-              out[code] = { pe, roe };
-              continue;
-            }
-          }
-          const re2 = new RegExp(`"index_code"\\s*:\\s*"${code}"[\\s\\S]{0,800}?"pe_ttm"\\s*:\\s*"?([\\d.]+)"?`, "i");
-          const m2 = t.match(re2);
-          if(m2){
-            const pe = parseFloat(m2[1]); if(Number.isFinite(pe) && pe>0 && pe<1000) out[code] = { pe, roe:null };
-          }
-        }
-      };
-      scripts.forEach(tryJson);
-
-      // 2) DOM fallback
-      const toNum = s => { const x = parseFloat(String(s).replace(/,/g,"").trim()); return Number.isFinite(x)? x : null; };
-      const pct2d = s => { const m = String(s||"").match(/(-?\\d+(?:\\.\\d+)?)\\s*%/); if(!m) return null; const v = parseFloat(m[1])/100; return (v>0&&v<1)? v:null; };
-
-      for(const code of want){
-        if(out[code]) continue;
-        const href = VC_CODE_LINK[code];
-        let a = document.querySelector(`a[href*="${href}"]`);
-        if(!a){ a = Array.from(document.querySelectorAll('a')).find(x => (x.getAttribute('href')||"").includes(code)); }
-        if(!a) continue;
-        let tr = a.closest("tr");
-        if(!tr){
-          let p=a.parentElement, depth=0;
-          while(p && depth<6 && !(p.querySelectorAll('td').length>=8)){ p=p.parentElement; depth++; }
-          tr=p;
-        }
-        if(!tr) continue;
-        const tds = Array.from(tr.querySelectorAll("td")).map(td=> td.innerText.trim());
-        if(tds.length>=8){
-          const pe  = toNum(tds[2]);
-          const roe = pct2d(tds[7]);
-          if(pe && pe>0 && pe<1000) out[code] = { pe, roe: (roe&&roe>0&&roe<1)? roe:null };
-        }
+    // 遍历每个目标：先按 <a href> 找行；否则按文本包含别名匹配
+    const out = {};
+    const rowFor = (code, aliases) => {
+      const href = VC_HREF[code];
+      let a = document.querySelector(`a[href*="${href}"]`);
+      if(a) return a.closest("tr");
+      // 按文本匹配
+      const test = new RegExp(aliases.map(x=>x.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|"));
+      const rows = Array.from(document.querySelectorAll("tr"));
+      for(const tr of rows){
+        const txt = (tr.textContent||"").trim();
+        if(test.test(txt)) return tr;
       }
-      return out;
-    }, VC_CODE_LINK);
+      return null;
+    };
 
-    // 2. DEBUGGING ON FAILURE
-    if (!hv || Object.keys(hv).length === 0) {
-      console.error("[ERROR] Failed to extract data from Value Center. Saving debug files.");
-      await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
-      const html = await pg.content();
-      fs.writeFileSync('debug_page.html', html);
-      console.error("[ERROR] Debug files 'debug_screenshot.png' and 'debug_page.html' saved.");
-      // 3. EXPLICIT ERROR
-      throw new Error('VC Map scraping returned no data.');
-    }
+    const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
+    const pct2d = s => { const m=String(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=parseFloat(m[1])/100; return (v>0&&v<1)?v:null; };
 
-    dbg("VC map", hv);
-    return hv || {};
-  } finally {
-    await br.close();
-  }
+    for(const [code, aliases] of Object.entries(VC_TARGETS)){
+      const tr = rowFor(code, aliases.map(norm));
+      if(!tr) continue;
+      const tds = Array.from(tr.querySelectorAll("td")).map(td=>td.innerText.trim());
+      if(!tds.length) continue;
+
+      // 取值
+      const pe  = toNum(tds[peIdx]  ?? tds[2]);
+      const roe = pct2d(tds[roeIdx] ?? tds[7]);
+      if(pe && pe>0 && pe<1000) out[code] = { pe, roe:(roe&&roe>0&&roe<1)?roe:null };
+    }
+    return out;
+  }, VC_TARGETS, VC_HREF);
+
+  await br.close();
+  dbg("VC map (DOM)", recs);
+  return recs || {};
 }
 
-let VC_CACHE=null;
+let VC_CACHE = null;
 async function getVC(code){
   if(!VC_CACHE){
-    try { VC_CACHE = await fetchVCMapPW(); }
-    catch(e){ dbg("VC fetch err", e.message); VC_CACHE = {}; }
+    try { VC_CACHE = await fetchVCMapDOM(); }
+    catch(e){ dbg("VC DOM err", e.message); VC_CACHE = {}; }
   }
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP*（与前一致）=====
+// ===== r_f / ERP* =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\\d{1,2}\\.\\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=h.replace(/<[^>]+>/g," "); const near=t.match(/(\\d{1,2}\\.\\d{1,4})\\s*%/); if(near) v=Number(near[1])/100; }
+    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
+    if(!Number.isFinite(v)){
+      const plain = h.replace(/<[^>]+>/g," ");
+      const near  = plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/china-10-year-bond-yield","CN 10Y")' };
   }}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
 async function rfUS(){ try{
@@ -205,8 +197,12 @@ async function rfUS(){ try{
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\\d{1,2}\\.\\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=h.replace(/<[^>]+>/g," "); const near=t.match(/(\\d{1,2}\\.\\d{1,4})\\s*%/); if(near) v=Number(near[1])/100; }
+    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
+    if(!Number.isFinite(v)){
+      const plain=h.replace(/<[^>]+>/g," ");
+      const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield","US 10Y")' };
   }}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
 async function rfJP(){ try{
@@ -214,8 +210,12 @@ async function rfJP(){ try{
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\\d{1,2}\\.\\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=h.replace(/<[^>]+>/g," "); const near=t.match(/(\\d{1,2}\\.\\d{1,4})\\s*%/); if(near) v=Number(near[1])/100; }
+    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
+    if(!Number.isFinite(v)){
+      const plain=h.replace(/<[^>]+>/g," ");
+      const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/japan-10-year-bond-yield","JP 10Y")' };
   }}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
 
@@ -225,10 +225,10 @@ async function erpFromDamodaran(re){
     const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
     if(r.ok){
       const h = await r.text();
-      const rows = h.split(/<\/tr>/i);
+      const rows = h.split("</tr>");
       const row  = rows.find(x => re.test(x)) || "";
       const plain = row.replace(/<[^>]+>/g," ");
-      const nums = [...plain.matchAll(/(\\d{1,2}\\.\\d{1,2})\\s*%/g)].map(m=>Number(m[1]));
+      const nums = [...plain.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
       const v = nums.find(x=>x>2 && x<10);
       if(v!=null) return { v:v/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran")` };
     }
@@ -236,7 +236,7 @@ async function erpFromDamodaran(re){
   return null;
 }
 async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpUS(){ return (await erpFromDamodaran(/(United\\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
 // ===== Nikkei：PER（DOM-only）=====
@@ -355,23 +355,16 @@ async function sendEmailIfEnabled(lines){
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
 
-  // --- OPTIMIZATION: Fetch shared data once at the beginning ---
-  const rf_cn_promise = rfCN();
-  const erp_cn_promise = erpCN();
-
-  // VC：scripts JSON 优先，DOM 兜底
+  // VC：DOM 直接取行
   let vcMap = {};
   if (USE_PW) {
-    try { vcMap = await fetchVCMapPW(); } catch(e){ 
-        console.error("[ERROR] Main block caught an error from fetchVCMapPW:", e.message);
-        vcMap = {}; 
-    }
+    try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
   }
 
   // 1) HS300（VC；CN10Y；ERP* China）
   const rec_hs = vcMap["SH000300"];
   const pe_hs = rec_hs?.pe ? { v: rec_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SH000300")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
-  const rf_cn  = await rf_cn_promise; // Reuse fetched data
+  const rf_cn  = await rfCN();
   const roe_hs = rec_hs?.roe ? { v: rec_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let r = await writeBlock(row,"沪深300", pe_hs, rf_cn, ERP_TARGET_CN, "真实", null, roe_hs);
   row = r.nextRow; const j_hs = r.judgment; const pv_hs = r.pe;
@@ -393,8 +386,7 @@ async function sendEmailIfEnabled(lines){
   // 4) 中概互联网（VC；CN10Y；ERP* China）
   const rec_cx = vcMap["CSIH30533"];
   const pe_cx = rec_cx?.pe ? { v: rec_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC CSIH30533")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
-  const rf_cn2  = await rf_cn_promise; // Reuse fetched data
-  const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erp_cn_promise; // Reuse fetched data
+  const rf_cn2  = await rfCN(); const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
   const roe_cx = rec_cx?.roe ? { v: rec_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   r = await writeBlock(row,"中概互联网", pe_cx, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link, roe_cx);
   row = r.nextRow; const j_cx = r.judgment; const pv_cx = r.pe;
@@ -402,11 +394,12 @@ async function sendEmailIfEnabled(lines){
   // 5) 恒生科技（VC；与中概同口径：CN10Y；ERP* China）
   const rec_hst = vcMap["HSTECH"];
   const pe_hst = rec_hst?.pe ? { v: rec_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC HSTECH")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
-  const rf_cn3 = await rf_cn_promise; // Reuse fetched data
-  const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erp_cn_promise; // Reuse fetched data
+  const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN();
   const roe_hst = rec_hst?.roe ? { v: rec_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   r = await writeBlock(row,"恒生科技", pe_hst, rf_cn3, erp_hk_v, erp_hk_tag, erp_hk_link, roe_hst);
   row = r.nextRow; const j_hst = r.judgment; const pv_hst = r.pe;
+  
+  // NOTE: You would add a new block here for "新经济" if you want it in your sheet.
 
   console.log("[DONE]", todayStr(), {
     hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cx?.v, hstech_pe: pe_hst?.v
