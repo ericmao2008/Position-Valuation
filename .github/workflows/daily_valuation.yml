@@ -55,7 +55,23 @@ jobs:
         run: npm ci || npm i
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
+      
+      # V-- 修改的部分在这里 --V
       - name: Run fetch & write (with one retry)
         run: |
           set -e
-          node scripts/fetch_pe_and_write_sheet.mjs || (echo "retry in 10s" && sleep 10 && node scripts/fetch_pe_and
+          node scripts/fetch_pe_and_write_sheet.mjs || {
+            echo "First run failed. Retrying in 10 seconds..."
+            sleep 10
+            node scripts/fetch_pe_and_write_sheet.mjs
+          }
+      # A-- 修改的部分在这里 --A
+      
+      - name: Upload Debug Artifacts on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-snapshot
+          path: |
+            debug_screenshot.png
+            debug_page.html
