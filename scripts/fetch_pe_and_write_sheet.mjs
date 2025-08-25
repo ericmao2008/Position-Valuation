@@ -1,11 +1,8 @@
 /**
  * Version History
- * V2.9.2 - Final Formatting & Feature Polish
- * - Fixed off-by-one error in format application logic within `writeBlock`.
- * - ROE rows are now correctly formatted as percentages (0.00%).
- * - ROE Factor row is now correctly formatted as a decimal (0.00).
- * - Added the "新经济" index to the main processing loop to ensure it's written to the sheet.
- * - Enhanced email summary to include ROE values for a more complete overview.
+ * V2.9.4 - UI Polish
+ * - Modified the '判定' (Judgment) field in `writeBlock` to only show the emoji (🟢, 🔴, 🟡) 
+ * and remove the descriptive text, as requested. This affects both the sheet and email summary.
  */
 
 import fetch from "node-fetch";
@@ -27,8 +24,7 @@ const VC_TARGETS = {
   SH000300: { name: "沪深300", code: "SH000300" },
   SP500:    { name: "标普500", code: "SP500" },
   CSIH30533:{ name: "中概互联50", code: "CSIH30533" },
-  HSTECH:   { name: "恒生科技", code: "HKHSTECH" },
-  HKHSSCNE: { name: "新经济", code: "HKHSSCNE" }
+  HSTECH:   { name: "恒生科技", code: "HKHSTECH" }
 };
 
 // ===== Policy / Defaults =====
@@ -44,7 +40,6 @@ const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();       return s?Number(s):null; })();
 const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
-const PE_OVERRIDE_NE      = (()=>{ const s=(process.env.PE_OVERRIDE_NE??"").trim();         return s?Number(s):null; })();
 const ROE_JP = numOr(process.env.ROE_JP, null);
 
 // ===== Sheets =====
@@ -104,7 +99,7 @@ async function fetchVCMapDOM(){
   await pg.waitForSelector('.container .out-row .name', { timeout: 20000 }).catch(()=>{});
   await pg.waitForLoadState('networkidle').catch(()=>{});
   await pg.waitForTimeout(1000);
-  
+
   const recs = await pg.evaluate((targets)=>{
     const out = {};
     const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
@@ -242,12 +237,13 @@ async function peNikkei(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
 }
 
+// ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
   let target = erpStar;
-  if(label.includes("沪深") || label.includes("中概") || label.includes("恒生") || label.includes("新经济")) target = ERP_TARGET_CN;
+  if(label.includes("沪深") || label.includes("中概") || label.includes("恒生")) target = ERP_TARGET_CN;
   const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;
   const ep = Number.isFinite(pe) ? 1/pe : null;
   const factor = (roe!=null && roe>0) ? (roe/ROE_BASE) : 1;
@@ -255,17 +251,21 @@ async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeR
   const peBuy  = (rf!=null && target!=null) ? Number((1/(rf+target+DELTA)*factor).toFixed(2)) : null;
   const peSell = (rf!=null && target!=null && (rf+target-DELTA)>0) ? Number((1/(rf+target-DELTA)*factor).toFixed(2)) : null;
   const fairRange = (peBuy!=null && peSell!=null) ? `${peBuy} ~ ${peSell}` : "";
+  
   let status="需手动更新";
   if(Number.isFinite(pe) && peBuy!=null && peSell!=null){
-    if (pe <= peBuy) status="🟢 买点（低估）";
-    else if (pe >= peSell) status="🔴 卖点（高估）";
-    else status="🟡 持有（合理）";
+    // --- CORRECTED: Keep only Emoji ---
+    if (pe <= peBuy) status="🟢";
+    else if (pe >= peSell) status="🔴";
+    else status="🟡";
+    // --- END CORRECTION ---
   }
+
   const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
-    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label.includes("沪深")||label.includes("中概")||label.includes("恒生")||label.includes("新经济") ? "CN 10Y":"US/JP 10Y"), rfRes?.link || "—"],
+    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label.includes("沪深")||label.includes("中概")||label.includes("恒生") ? "CN 10Y":"US/JP 10Y"), rfRes?.link || "—"],
     ["目标 ERP*", (Number.isFinite(target)?target:""), (Number.isFinite(target)?"真实":"兜底"), "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）","—"],
     ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点=1/(r_f+ERP*+δ)×factor","—"],
@@ -280,16 +280,12 @@ async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeR
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
   const requests = [];
-  // --- CORRECTED FORMATTING INDICES ---
-  // Apply Percentage format
   [2,3,4,5,9,10].forEach(i=>{ const r=(startRow-1)+i;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  // Apply Number format
   [1,6,7,11].forEach(i=>{ const r=(startRow-1)+i;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  // --- END CORRECTION ---
   requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:(startRow-1)+0, endRowIndex:(startRow-1)+1, startColumnIndex:0, endColumnIndex:5 },
     cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } }, fields:"userEnteredFormat(backgroundColor,textFormat)" }});
   requests.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
@@ -302,6 +298,7 @@ async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeR
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
+// ===== Email =====
 async function sendEmailIfEnabled(lines){
   const { SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,MAIL_TO,MAIL_FROM_NAME,MAIL_FROM_EMAIL,FORCE_EMAIL } = process.env;
   if(!SMTP_HOST||!SMTP_PORT||!SMTP_USER||!SMTP_PASS||!MAIL_TO){ dbg("[MAIL] skip env"); return; }
@@ -379,16 +376,9 @@ async function sendEmailIfEnabled(lines){
   let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
   row = res_hst.nextRow;
-
-  // 6) 新经济
-  let r_ne = vcMap["HKHSSCNE"];
-  let pe_ne = r_ne?.pe ? { v: r_ne.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NE??"", tag:"兜底", link:"—" };
-  let roe_ne = r_ne?.roe ? { v: r_ne.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_ne = await writeBlock(row, VC_TARGETS.HKHSSCNE.name, pe_ne, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_ne);
-  row = res_ne.nextRow;
-
+  
   console.log("[DONE]", todayStr(), {
-    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, nikkei_pe: res_nk.pe, cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, ne_pe: res_ne.pe
+    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, nikkei_pe: res_nk.pe, cxin_pe: res_cx.pe, hstech_pe: res_hst.pe
   });
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
@@ -398,8 +388,7 @@ async function sendEmailIfEnabled(lines){
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
     `Nikkei PE: ${res_nk.pe ?? "-"} ${roeFmt(res_nk.roe)}→ ${res_nk.judgment ?? "-"}`,
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
-    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
-    `New Economy PE: ${res_ne.pe ?? "-"} ${roeFmt(res_ne.roe)}→ ${res_ne.judgment ?? "-"}`
+    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`
   ];
   await sendEmailIfEnabled(lines);
 })();
