@@ -1,10 +1,10 @@
-/**
+ /**
  * Version History
- * V2.7.17 - Gemini Final Debugging Step
- *  - Added a check in the Main function. If vcMap is empty after scraping,
- *    the script will exit with error code 1.
- *  - This forces the GitHub Actions step to be marked as "failed",
- *    which in turn triggers the `if: failure()` condition to upload debug artifacts.
+ * V2.8.1 (Full Version) - Final code by Gemini
+ * - This is the complete and final version incorporating all fixes.
+ * - Rewrote the core scraping logic in `fetchVCMapDOM` to adapt to the new div-based layout.
+ * - Restored the full logic for all 5 target indices in the Main function.
+ * - The script will now exit with an error code if scraping fails, triggering the artifact upload on GitHub Actions.
  */
 
 import fetch from "node-fetch";
@@ -21,19 +21,13 @@ const dbg    = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
 const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
 
+// 目标指数
 const VC_TARGETS = {
-  SH000300: ["沪深300", "上证沪深300", "SH000300", "沪深 300"],
-  SP500:    ["标普500", "SP500", "S&P500", "S&P 500", "标准普尔500"],
-  CSIH30533:["中概互联网50","中概互联50","中概互联网 50","CSIH30533"],
-  HSTECH:   ["恒生科技","恒生科技指数","HSTECH","恒生 科技"],
-  HKHSSCNE: ["新经济", "HKHSSCNE"]
-};
-const VC_HREF = {
-  SH000300:"/dj-valuation-table-detail/SH000300",
-  SP500:"/dj-valuation-table-detail/SP500",
-  CSIH30533:"/dj-valuation-table-detail/CSIH30533",
-  HSTECH:"/dj-valuation-table-detail/HSTECH",
-  HKHSSCNE:"/dj-valuation-table-detail/HKHSSCNE"
+  SH000300: { name: "沪深300", href: "/dj-valuation-table-detail/SH000300" },
+  SP500:    { name: "标普500", href: "/dj-valuation-table-detail/SP500" },
+  CSIH30533:{ name: "中概互联网", href: "/dj-valuation-table-detail/CSIH30533" },
+  HSTECH:   { name: "恒生科技", href: "/dj-valuation-table-detail/HSTECH" },
+  HKHSSCNE: { name: "新经济", href: "/dj-valuation-table-detail/HKHSSCNE" }
 };
 
 // ===== Policy / Defaults =====
@@ -99,16 +93,16 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
+// ===== Value Center：Playwright DOM（适配新的DIV布局）=====
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
   const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
   const pg  = await ctx.newPage();
   await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
-  await Promise.race([
-    pg.waitForSelector('table', { timeout: 8000 }),
-    ...Object.values(VC_HREF).map(h => pg.waitForSelector(`a[href*="${h}"]`, { timeout: 8000 }).catch(()=>{}))
-  ]).catch(()=>{});
+  
+  // 等待页面加载完成的标志，这里我们等待第一个指数链接出现
+  await pg.waitForSelector(`a[href*="${VC_TARGETS.SH000300.href}"]`, { timeout: 15000 }).catch(()=>{});
   await pg.waitForLoadState('networkidle').catch(()=>{});
   await pg.waitForTimeout(1000);
 
@@ -118,46 +112,39 @@ async function fetchVCMapDOM(){
   fs.writeFileSync('debug_page.html', html);
   console.log("[DEBUG] Snapshot 'debug_screenshot.png' and 'debug_page.html' saved.");
 
-  const recs = await pg.evaluate((args)=>{
-    const { targets, hrefs } = args;
-    const norm = s => (s||"").replace(/\s+/g,"").toUpperCase();
-    let peIdx = 2, roeIdx = 7;
-    const ths = Array.from(document.querySelectorAll("th")).map(th=>norm(th.textContent));
-    if(ths.length){
-      const idxBy = kw => ths.findIndex(t => t.includes(kw));
-      const iPE  = idxBy("PE");
-      const iROE = idxBy("ROE");
-      if(iPE>=0) peIdx  = iPE;
-      if(iROE>=0) roeIdx = iROE;
-    }
-    const out = {};
-    const rowFor = (code, aliases) => {
-      const href = hrefs[code];
-      if (href) {
-        let a = document.querySelector(`a[href*="${href}"]`);
-        if(a) return a.closest("tr");
-      }
-      const test = new RegExp(aliases.map(x=>x.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|"));
-      const rows = Array.from(document.querySelectorAll("tr"));
-      for(const tr of rows){
-        const txt = (tr.textContent||"").trim();
-        if(test.test(txt)) return tr;
-      }
-      return null;
-    };
-    const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
+  const recs = await pg.evaluate((targets)=>{
+    const out = {};
+    const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
     const pct2d = s => { const m=String(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=parseFloat(m[1])/100; return (v>0&&v<1)?v:null; };
-    for(const [code, aliases] of Object.entries(targets)){
-      const tr = rowFor(code, aliases.map(norm));
-      if(!tr) continue;
-      const tds = Array.from(tr.querySelectorAll("td")).map(td=>td.innerText.trim());
-      if(!tds.length) continue;
-      const pe  = toNum(tds[peIdx]  ?? tds[2]);
-      const roe = pct2d(tds[roeIdx] ?? tds[7]);
-      if(pe && pe>0 && pe<1000) out[code] = { pe, roe:(roe&&roe>0&&roe<1)?roe:null };
-    }
-    return out;
-  }, { targets: VC_TARGETS, hrefs: VC_HREF });
+
+    for (const [code, target] of Object.entries(targets)) {
+      // 1. 通过独一无二的 href 链接找到 <a> 标签
+      const anchor = document.querySelector(`a[href*="${target.href}"]`);
+      if (!anchor) continue;
+      
+      // 2. 向上查找直到找到“行”的容器
+      let row = anchor.parentElement;
+      while(row && (!row.className || !String(row.className).startsWith('row___'))) {
+        row = row.parentElement;
+      }
+      if (!row) continue;
+
+      // 3. 在“行”容器内，通过专属“身份证”（CSS类名）查找PE和ROE
+      const peEl = row.querySelector('[class*="pe___"]');
+      const roeEl = row.querySelector('[class*="roe___"]');
+
+      const peText = peEl ? peEl.textContent : null;
+      const roeText = roeEl ? roeEl.textContent : null;
+
+      const pe = toNum(peText);
+      const roe = pct2d(roeText);
+
+      if(pe && pe>0 && pe<1000) {
+        out[code] = { pe, roe: (roe && roe > 0 && roe < 1) ? roe : null };
+      }
+    }
+    return out;
+  }, VC_TARGETS);
 
   await br.close();
   dbg("VC map (DOM)", recs);
@@ -173,6 +160,7 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
+// ===== r_f / ERP* =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -341,49 +329,59 @@ async function sendEmailIfEnabled(lines){
   if (USE_PW) {
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
     
-    // V-- 新增的检查逻辑 --V
-    if (Object.keys(vcMap).length === 0) {
+    if (Object.keys(vcMap).length === 0 && USE_PW) {
       console.error("[ERROR] Scraping from Value Center failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
       process.exit(1);
     }
-    // A-- 新增的检查逻辑 --A
   }
 
+  // Pre-fetch all data concurrently for efficiency
+  const rf_cn_promise = rfCN();
+  const erp_cn_promise = erpCN();
+  const rf_us_promise = rfUS();
+  const erp_us_promise = erpUS();
+  const pe_nk_promise = peNikkei();
+  const rf_jp_promise = rfJP();
+  const erp_jp_promise = erpJP();
+
+  // 1) HS300
   const rec_hs = vcMap["SH000300"];
-  const pe_hs = rec_hs?.pe ? { v: rec_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SH000300")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
-  const rf_cn  = await rfCN();
+  const pe_hs = rec_hs?.pe ? { v: rec_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   const roe_hs = rec_hs?.roe ? { v: rec_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let r = await writeBlock(row,"沪深300", pe_hs, rf_cn, ERP_TARGET_CN, "真实", null, roe_hs);
+  let r = await writeBlock(row, VC_TARGETS.SH000300.name, pe_hs, await rf_cn_promise, ERP_TARGET_CN, "真实", null, roe_hs);
   row = r.nextRow; const j_hs = r.judgment; const pv_hs = r.pe;
 
+  // 2) SP500
   const rec_sp = vcMap["SP500"];
-  const pe_spx = rec_sp?.pe ? { v: rec_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SP500")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
-  const rf_us  = await rfUS(); const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
+  const pe_spx = rec_sp?.pe ? { v: rec_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
   const roe_spx = rec_sp?.roe ? { v: rec_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  r = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link, roe_spx);
+  const erp_us = await erp_us_promise;
+  r = await writeBlock(row, VC_TARGETS.SP500.name, pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
   row = r.nextRow; const j_sp = r.judgment; const pv_sp = r.pe;
 
-  const pe_nk = await peNikkei(); const rf_jp  = await rfJP(); const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
+  // 3) Nikkei
   const roe_nk = (ROE_JP!=null) ? { v:ROE_JP, tag:"覆写", link:"—" } : { v:null, tag:"兜底", link:"—" };
-  r = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, roe_nk);
+  const erp_jp = await erp_jp_promise;
+  r = await writeBlock(row, "日经指数", await pe_nk_promise, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
   row = r.nextRow; const j_nk = r.judgment; const pv_nk = r.pe;
 
+  // 4) 中概互联网
   const rec_cx = vcMap["CSIH30533"];
-  const pe_cx = rec_cx?.pe ? { v: rec_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC CSIH30533")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
-  const rf_cn2  = await rfCN(); const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
+  const pe_cx = rec_cx?.pe ? { v: rec_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   const roe_cx = rec_cx?.roe ? { v: rec_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  r = await writeBlock(row,"中概互联网", pe_cx, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link, roe_cx);
+  const erp_cn = await erp_cn_promise;
+  r = await writeBlock(row, VC_TARGETS.CSIH30533.name, pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
   row = r.nextRow; const j_cx = r.judgment; const pv_cx = r.pe;
 
+  // 5) 恒生科技
   const rec_hst = vcMap["HSTECH"];
-  const pe_hst = rec_hst?.pe ? { v: rec_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC HSTECH")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
-  const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN();
+  const pe_hst = rec_hst?.pe ? { v: rec_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   const roe_hst = rec_hst?.roe ? { v: rec_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  r = await writeBlock(row,"恒生科技", pe_hst, rf_cn3, erp_hk_v, erp_hk_tag, erp_hk_link, roe_hst);
+  r = await writeBlock(row, VC_TARGETS.HSTECH.name, pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
   row = r.nextRow; const j_hst = r.judgment; const pv_hst = r.pe;
   
   console.log("[DONE]", todayStr(), {
-    hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cx?.v, hstech_pe: pe_hst?.v
+    hs300_pe: pv_hs, spx_pe: pv_sp, nikkei_pe: pv_nk, cxin_pe: pv_cx, hstech_pe: pv_hst
   });
 
   const lines = [
