@@ -1,37 +1,18 @@
 /**
  * Version History
+ * V2.6.5
+ *  - 开始前清空当日工作表的内容与样式（含边框），避免重复与样式残留
+ *  - 写入范围与实际行数统一用 totalRows 计算，修复范围不匹配错误
+ *  - 每块后自动留 1 行空行，区隔更明显
+ *  - 保持方案B：仅展示“ROE因子后”的阈值与判定
+ *
  * V2.6.4
- *  - 修复：写入表头后未同步扩大写入范围，导致 A1:E15 却写了 16 行 → 现统一用 totalRows 计算范围与样式
+ *  - 修复上版写入范围与行数不一致
  *
  * V2.6.3
- *  - 简化：仅保留“方案B（ROE倍数因子）”后的单套阈值；写明公式；按因子阈值判定
+ *  - 简化为方案B单套结果；按因子阈值判定；写明公式
  *
- * V2.6.2
- *  - 去重 P/E；区隔样式；（当时并行原始阈值与 ROE 因子阈值）
- *
- * V2.6.1
- *  - 百分比格式修正；ROE(TTM) 抓取增强
- *
- * V2.6
- *  - 方案B：合理PE（ROE因子） = 1/(r_f+ERP*) × (ROE/ROE_BASE)
- *
- * V2.5
- *  - 中概互联网：r_f=中国10Y；ERP*=China
- *
- * V2.4
- *  - 新增中概互联网（CSIH30533）
- *
- * V2.3
- *  - δ → P/E 空间三阈值
- *
- * V2.2
- *  - Nikkei PER + 空串不写0
- *
- * V2.1
- *  - 新增 Nikkei 225
- *
- * V2.0
- *  - HS300 + SPX 基础版
+ * ……（更早版本变更见此前历史）
  */
 
 import fetch from "node-fetch";
@@ -96,14 +77,41 @@ async function write(range, rows){
     requestBody:{ values: rows }
   });
 }
+async function clearTodaySheet(sheetTitle, sheetId){
+  // 1) 清空值（A:Z）
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `'${sheetTitle}'!A:Z`,
+  });
+  // 2) 清空样式（含边框）
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {  // 恢复默认单元格格式
+            range: { sheetId, startRowIndex:0, startColumnIndex:0, endColumnIndex:26, endRowIndex:2000 },
+            cell: { userEnteredFormat: {} },
+            fields: "userEnteredFormat"
+          }
+        },
+        {
+          updateBorders: { // 边框清为 NONE
+            range: { sheetId, startRowIndex:0, startColumnIndex:0, endColumnIndex:26, endRowIndex:2000 },
+            top: { style:"NONE" }, bottom:{ style:"NONE" }, left:{ style:"NONE" }, right:{ style:"NONE" },
+            innerHorizontal:{ style:"NONE" }, innerVertical:{ style:"NONE" }
+          }
+        }
+      ]
+    }
+  });
+}
 
 // ---------- r_f ----------
 async function rfCN() {
-  dbg("rfCN start (Investing first)");
   try {
     const url = "https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
     const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
-    dbg("rfCN investing status", r.status);
     if (r.ok) {
       const h = await r.text();
       let m = h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i);
@@ -113,18 +121,13 @@ async function rfCN() {
         const near = text.match(/(收益率|Yield)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) ||
                      text.match(/(\d{1,2}\.\d{1,4})\s*%/);
         if (near) v = Number(near[2] || near[1]) / 100;
-        dbg("rfCN regex pct near", v);
       }
-      if (Number.isFinite(v) && v > 0 && v < 1)
-        return { v, tag: "真实", link: `=HYPERLINK("${url}","CN 10Y (Investing)")` };
+      if (Number.isFinite(v) && v > 0 && v < 1) return { v, tag: "真实", link: `=HYPERLINK("${url}","CN 10Y (Investing)")` };
     }
-  } catch (e) { dbg("rfCN investing err", e.message); }
-  dbg("rfCN fallback", RF_CN);
+  } catch {}
   return { v: RF_CN, tag: "兜底", link: "—" };
 }
-
 async function rfUS() {
-  dbg("rfUS start (Investing)");
   const urls = [
     "https://cn.investing.com/rates-bonds/u.s.-10-year-bond-yield",
     "https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield"
@@ -132,7 +135,6 @@ async function rfUS() {
   for (const url of urls) {
     try {
       const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
-      dbg("rfUS status", url, r.status);
       if (!r.ok) continue;
       const h = await r.text();
       let v = null;
@@ -143,20 +145,15 @@ async function rfUS() {
         const m2 = text.match(/(Yield|收益率)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) || text.match(/(\d{1,2}\.\d{1,4})\s*%/);
         if (m2) v = Number(m2[2] || m2[1]) / 100;
       }
-      if (Number.isFinite(v) && v > 0 && v < 1)
-        return { v, tag: "真实", link: `=HYPERLINK("${url}","US 10Y (Investing)")` };
-    } catch (e) { dbg("rfUS err", url, e.message); }
+      if (Number.isFinite(v) && v > 0 && v < 1) return { v, tag: "真实", link: `=HYPERLINK("${url}","US 10Y (Investing)")` };
+    } catch {}
   }
-  dbg("rfUS fallback", RF_US);
   return { v: RF_US, tag: "兜底", link: "—" };
 }
-
 async function rfJP() {
-  dbg("rfJP start (Investing)");
   const url = "https://cn.investing.com/rates-bonds/japan-10-year-bond-yield";
   try {
     const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
-    dbg("rfJP status", r.status);
     if (r.ok) {
       const h = await r.text();
       let v = null;
@@ -167,33 +164,25 @@ async function rfJP() {
         const m2 = text.match(/(Yield|收益率)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) || text.match(/(\d{1,2}\.\d{1,4})\s*%/);
         if (m2) v = Number(m2[2] || m2[1]) / 100;
       }
-      if (Number.isFinite(v) && v > 0 && v < 1)
-        return { v, tag: "真实", link: `=HYPERLINK("${url}","JP 10Y (Investing)")` };
+      if (Number.isFinite(v) && v > 0 && v < 1) return { v, tag: "真实", link: `=HYPERLINK("${url}","JP 10Y (Investing)")` };
     }
-  } catch (e) { dbg("rfJP err", e.message); }
-  dbg("rfJP fallback", RF_JP);
+  } catch {}
   return { v: RF_JP, tag: "兜底", link: "—" };
 }
 
 // ---------- ERP*(通用) ----------
 async function erpFromDamodaran(countryRegex, fallbackPct){
-  dbg("erp* start", countryRegex);
   const url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
   try{
     const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
-    dbg("erp* status", r.status);
-    if(!r.ok) throw new Error("status not ok");
+    if(!r.ok) throw 0;
     const html = await r.text();
-
     const row  = html.split(/<\/tr>/i).find(tr => new RegExp(countryRegex, "i").test(tr)) || "";
     const text = row.replace(/<[^>]+>/g, " ");
     const pcts = [...text.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m => Number(m[1]));
-    dbg("erp* row pcts", countryRegex, pcts);
     const candidate = pcts.find(x => x > 2 && x < 10);
     if (candidate != null) return { v:candidate/100, tag:"真实", link:`=HYPERLINK("${url}", "Damodaran(${countryRegex})")` };
-  }catch(e){
-    dbg("erp* error", e.message);
-  }
+  }catch{}
   return { v: fallbackPct, tag: "兜底",
            link: `=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")` };
 }
@@ -201,8 +190,8 @@ async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433);
 async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 async function erpCN(){  return erpFromDamodaran("^\\s*China\\s*$|China", 0.0527); }
 
-// ========== Danjuan：PE 抓取 ==========
-async function peHS300(){ /* 与上一版一致，略 */ 
+// ========== 指数 P/E 抓取（与前版一致的稳健实现） ==========
+async function peHS300(){
   const url = "https://danjuanfunds.com/index-detail/SH000300";
   try{
     if (USE_PW) {
@@ -225,77 +214,138 @@ async function peHS300(){ /* 与上一版一致，略 */
         }
         return null;
       }).catch(()=> null);
-      await br.close();
-      if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
+      await br.close(); if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` };
     }
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:12000 });
     if(r.ok){
       const h=await r.text(); const text=strip(h);
-      let m=text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/); if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` }; }
-      const j=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i); if(j){ const v=Number(j[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` }; }
+      let m=text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` }; }
+      const j=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(j){ const v=Number(j[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan")` }; }
     }
   }catch{}
   if(PE_OVERRIDE_CN!=null) return { v:PE_OVERRIDE_CN, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
 }
-async function peSPX(){ /* 同上一版，略 */ 
+async function peSPX(){
   const urlIdx="https://danjuanfunds.com/index-detail/SP500", urlVal="https://danjuanfunds.com/dj-valuation-table-detail/SP500";
   try{
-    if(USE_PW){
+    if (USE_PW) {
       const { chromium } = await import("playwright");
-      const br=await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-      const ctx=await br.newContext({ userAgent:UA, locale:'zh-CN', timezoneId:TZ }); const pg=await ctx.newPage();
-      await pg.goto(urlIdx,{ waitUntil:'domcontentloaded' }); await pg.waitForTimeout(3000);
-      let text=await pg.locator("body").innerText().catch(()=> "");
-      let m=text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(urlIdx, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(3000);
+      let text = await pg.locator("body").innerText().catch(()=> "");
+      let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if(m){ const v=Number(m[1]); await br.close(); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${urlIdx}","Danjuan SP500")` }; }
-      const v2=await pg.evaluate(()=>{ const re=/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i; for(const el of Array.from(document.querySelectorAll("body *"))){ const t=(el.textContent||"").trim(); if(/分位/.test(t)) continue; const m=t.match(re); if(m) return parseFloat(m[1]); } return null; }).catch(()=> null);
+      const v2 = await pg.evaluate(()=>{
+        const re=/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
+        for(const el of Array.from(document.querySelectorAll("body *"))){
+          const t=(el.textContent||"").trim();
+          if(/分位/.test(t)) continue;
+          const m=t.match(re);
+          if(m) return parseFloat(m[1]);
+        }
+        return null;
+      }).catch(()=> null);
       await br.close(); if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${urlIdx}","Danjuan SP500")` };
     }
-    const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:12000 }); if(r.ok){ const h=await r.text(); let m=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i) || strip(h).match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/); if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` }; } }
+    const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:12000 });
+    if(r.ok){
+      const h=await r.text(); let m=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i); 
+      if(!m){ const t=strip(h); m=t.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/); }
+      if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` }; }
+    }
   }catch{}
   if(PE_OVERRIDE_SPX!=null) return { v:PE_OVERRIDE_SPX, tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
 }
-async function peNikkei(){ /* 同上一版，略 */ 
-  const url="https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
+async function peNikkei(){
+  const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
   try{
-    if(USE_PW){
-      const { chromium }=await import("playwright");
-      const br=await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-      const ctx=await br.newContext({ userAgent:UA, locale:'en-US', timezoneId:TZ }); const pg=await ctx.newPage();
-      await pg.goto(url,{ waitUntil:'domcontentloaded' }); await pg.waitForTimeout(1500);
-      const v=await pg.evaluate(()=>{ const tbl=document.querySelector("table"); if(!tbl) return null; const rows=tbl.querySelectorAll("tbody tr"); const row=rows[rows.length-1]; if(!row) return null; const tds=row.querySelectorAll("td"); if(tds.length<3) return null; const txt=(tds[2].textContent||"").trim().replace(/,/g,""); const n=parseFloat(txt); return Number.isFinite(n)? n:null; });
-      await br.close(); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+    if (USE_PW) {
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(1500);
+      const v = await pg.evaluate(()=>{
+        const tbl = document.querySelector("table"); if(!tbl) return null;
+        const rows = tbl.querySelectorAll("tbody tr"); const row = rows[rows.length - 1]; if(!row) return null;
+        const tds = row.querySelectorAll("td"); if(tds.length < 3) return null;
+        const txt = (tds[2].textContent||"").trim().replace(/,/g,""); const n = parseFloat(txt);
+        return Number.isFinite(n) ? n : null;
+      });
+      await br.close();
+      if(Number.isFinite(v) && v>0 && v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
     }
-    const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:15000 });
-    if(r.ok){ const h=await r.text(); const trs=[...h.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(m=>m[1]); let lastVal=null; for(const tr of trs){ const tds=[...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m=>m[1].replace(/<[^>]*>/g,"").trim()); if(tds.length>=3 && /[A-Za-z]{3}\/\d{2}\/\d{4}/.test(tds[0])){ const n=parseFloat(tds[2].replace(/,/g,"")); if(Number.isFinite(n)) lastVal=n; } } if(Number.isFinite(lastVal)&&lastVal>0&&lastVal<1000) return { v:lastVal, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` }; }
+    const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:15000 });
+    if(r.ok){
+      const h = await r.text();
+      const trs = [...h.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(m=>m[1]);
+      let lastVal = null;
+      for(const tr of trs){
+        const tds = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m=>m[1].replace(/<[^>]*>/g,"").trim());
+        if(tds.length>=3 && /[A-Za-z]{3}\/\d{2}\/\d{4}/.test(tds[0])){
+          const n = parseFloat(tds[2].replace(/,/g,""));
+          if(Number.isFinite(n)) lastVal = n;
+        }
+      }
+      if(Number.isFinite(lastVal) && lastVal>0 && lastVal<1000) return { v:lastVal, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+    }
   }catch{}
-  if(PE_OVERRIDE_NIKKEI!=null) return { v:PE_OVERRIDE_NIKKEI, tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+  if(PE_OVERRIDE_NIKKEI!=null) return { v: PE_OVERRIDE_NIKKEI, tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
 }
-async function peChinaInternet(){ /* 同上一版，略 */ 
-  const url="https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533";
+async function peChinaInternet(){
+  const url = "https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533";
   try{
-    if(USE_PW){
-      const { chromium }=await import("playwright");
-      const br=await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-      const ctx=await br.newContext({ userAgent:UA, locale:'zh-CN', timezoneId:TZ }); const pg=await ctx.newPage();
-      await pg.goto(url,{ waitUntil:'domcontentloaded' }); await pg.waitForTimeout(1800);
-      let body=await pg.locator("body").innerText().catch(()=> ""); let m=body && body.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
-      if(m){ const v=Number(m[1]); await br.close(); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; }
-      const v2=await pg.evaluate(()=>{ const bad=(t)=>/分位|百分位|%/.test(t); const re=/(\d{1,3}\.\d{1,2})/; let best=null; for(const el of Array.from(document.querySelectorAll("body *"))){ const t=(el.textContent||"").trim(); if(!/PE\b/i.test(t)) continue; if(bad(t)) continue; const m=t.match(re); if(m){ const x=parseFloat(m[1]); if(Number.isFinite(x)) best=x; } } return best; }).catch(()=> null);
-      await br.close(); if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+    if (USE_PW) {
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(1800);
+      let bodyText = await pg.locator("body").innerText().catch(()=> "");
+      let m = bodyText && bodyText.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if (m) { const v = Number(m[1]); await br.close(); if(Number.isFinite(v) && v>0 && v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; }
+      const v2 = await pg.evaluate(()=>{
+        const isBad = (t)=> /分位|百分位|%/.test(t);
+        const reNum = /(\d{1,3}\.\d{1,2})/;
+        let best = null;
+        for(const el of Array.from(document.querySelectorAll("body *"))){
+          const t = (el.textContent||"").trim();
+          if(!/PE\b/i.test(t)) continue;
+          if(isBad(t)) continue;
+          const m = t.match(reNum);
+          if(m){ const x = parseFloat(m[1]); if(Number.isFinite(x)) best = x; }
+        }
+        return best;
+      }).catch(()=> null);
+      await br.close();
+      if(Number.isFinite(v2) && v2>0 && v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
     }
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
-    if(r.ok){ const h=await r.text(); const text=strip(h); let m=text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/); if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; } const j=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i); if(j){ const v=Number(j[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; } }
+    if(r.ok){
+      const h=await r.text();
+      const text=strip(h);
+      let m = text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(m){ const v=Number(m[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; }
+      let mJson = h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(mJson){ const v=Number(mJson[1]); if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` }; }
+    }
   }catch{}
   if(PE_OVERRIDE_CXIN!=null) return { v:PE_OVERRIDE_CXIN, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
 }
 
-// ========== ROE(TTM) 抓取（同上一版） ==========
-async function roeFromDanjuan(urls){ /* 同上一版，略 */ 
+// ========== ROE(TTM) 抓取 ==========
+async function roeFromDanjuan(urls){
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -308,11 +358,20 @@ async function roeFromDanjuan(urls){ /* 同上一版，略 */
         const body = await pg.locator("body").innerText().catch(()=> "");
         let m = body && body.match(/ROE[^%\d]{0,20}(\d{1,2}(?:\.\d{1,2})?)\s*%/i);
         if(m){ const v=Number(m[1])/100; await br.close(); return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` }; }
-        const v2 = await pg.evaluate(()=>{ const re=/(\d{1,2}(?:\.\d{1,2})?)\s*%/; for(const el of Array.from(document.querySelectorAll("body *"))){ const t=(el.textContent||"").trim(); if(!/ROE\b/i.test(t)) continue; const m=t.match(re); if(m){ const x=parseFloat(m[1]); if(Number.isFinite(x)) return x/100; } } return null; }).catch(()=> null);
+        const v2 = await pg.evaluate(()=>{
+          const rePct = /(\d{1,2}(?:\.\d{1,2})?)\s*%/;
+          for(const el of Array.from(document.querySelectorAll("body *"))){
+            const t=(el.textContent||"").trim();
+            if(!/ROE\b/i.test(t)) continue;
+            const m=t.match(rePct);
+            if(m){ const x = parseFloat(m[1]); if(Number.isFinite(x)) return x/100; }
+          }
+          return null;
+        }).catch(()=> null);
         if(Number.isFinite(v2)) { await br.close(); return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","ROE")` }; }
       }
       await br.close();
-    }catch(e){ dbg("ROE PW err", e.message); }
+    }catch{}
   }
   for(const url of urls){
     try{
@@ -323,7 +382,7 @@ async function roeFromDanjuan(urls){ /* 同上一版，略 */
       if(m){ const v = Number(m[1])/100; return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` }; }
       m = h.match(/"roe(?:_ttm)?"\s*:\s*"?(\d{1,2}(?:\.\d{1,2})?)"?/i);
       if(m){ const v = Number(m[1])/100; return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` }; }
-    }catch(e){ dbg("ROE HTTP err", e.message); }
+    }catch{}
   }
   return { v:"", tag:"兜底", link:"—" };
 }
@@ -331,7 +390,7 @@ async function roeHS300(){ return roeFromDanjuan(["https://danjuanfunds.com/inde
 async function roeSPX(){  return roeFromDanjuan(["https://danjuanfunds.com/dj-valuation-table-detail/SP500","https://danjuanfunds.com/index-detail/SP500"]); }
 async function roeCXIN(){ return roeFromDanjuan(["https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533"]); }
 
-// ---------- 写单块（仅保留“ROE因子后”的单套阈值 & 视觉区隔） ----------
+// ---------- 写单块（仅“ROE因子后”阈值 & 视觉区隔；并保证范围一致） ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
 
@@ -362,7 +421,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     else status="🟡 持有（合理）";
   }
 
-  // 组装：表头 + 内容
+  // 表头 + 内容
   const header = ["字段","数值","数据","说明","数据源"];
   const body = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
@@ -384,72 +443,68 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   ];
 
   const values = [header, ...body];
-  const totalRows = values.length; // 表头 + 内容行总数
+  const totalRows = values.length;
   const endRow = startRow + totalRows - 1;
 
-  // 写入（范围与实际行数一致）
+  // 写入
   await write(`'${sheetTitle}'!A${startRow}:E${endRow}`, values);
 
-  // —— 单元格格式化 —— 
-  // 在“values”里：行索引从 0 开始；我们只需把 E/P、r_f、ERP*、δ、ROE、ROE基准设百分比；P/E与阈值设为数字
-  // 表头在第 0 行，数据从第 1 行开始
-  const base = startRow - 1; // 转 0-based
-  const pctRowsAbs = [ // 绝对（工作表）行号：E/P(第3行数据=索引2)、r_f(3)、ERP*(5)、δ(6)、ROE(11)、ROE基准(12)
-    base + 1 + 2,  // E/P
-    base + 1 + 3,  // r_f
+  // 格式化
+  const base = startRow - 1;
+  const pctRowsAbs = [
+    base + 1 + 3,  // E/P（第3行数据）
+    base + 1 + 4,  // r_f
     base + 1 + 5,  // ERP*
     base + 1 + 6,  // δ
     base + 1 + 11, // ROE
     base + 1 + 12, // ROE基准
   ];
   const numberRowsAbs = [
-    base + 1 + 1,  // P/E
-    base + 1 + 7,  // 对应P/E上限（因子）
-    base + 1 + 8,  // 买点上限（因子）
-    base + 1 + 9,  // 卖点下限（因子）
-    base + 1 + 12, // 因子数值本身
-  ];
-
-  const requests = [
-    // 百分比格式
-    ...pctRowsAbs.map(r => ({
-      repeatCell: {
-        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
-        fields: "userEnteredFormat.numberFormat"
-      }
-    })),
-    // 普通数字：P/E 与三阈值、因子
-    ...numberRowsAbs.map(r => ({
-      repeatCell: {
-        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
-        fields: "userEnteredFormat.numberFormat"
-      }
-    })),
-    // 视觉区隔：给“指数”行（values 的第1行 = 工作表的 startRow+1）加粗浅灰
-    {
-      repeatCell: {
-        range: { sheetId, startRowIndex: base + 1 + 0, endRowIndex: base + 1 + 1, startColumnIndex:0, endColumnIndex:5 },
-        cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
-        fields: "userEnteredFormat(backgroundColor,textFormat)"
-      }
-    },
-    // 分块外框
-    {
-      updateBorders: {
-        range: { sheetId, startRowIndex: base, endRowIndex: base + totalRows, startColumnIndex:0, endColumnIndex:5 },
-        top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-        bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-        left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-        right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } }
-      }
-    }
+    base + 1 + 2,  // P/E
+    base + 1 + 7,  // 中枢阈值（因子）
+    base + 1 + 8,  // 买点阈值（因子）
+    base + 1 + 9,  // 卖点阈值（因子）
+    base + 1 + 13, // 因子本身
   ];
 
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
-    requestBody: { requests }
+    requestBody: {
+      requests: [
+        ...pctRowsAbs.map(r => ({
+          repeatCell: {
+            range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
+        })),
+        ...numberRowsAbs.map(r => ({
+          repeatCell: {
+            range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
+        })),
+        // “指数”行加粗浅灰
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex: base + 1 + 1, endRowIndex: base + 1 + 2, startColumnIndex:0, endColumnIndex:5 },
+            cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+            fields: "userEnteredFormat(backgroundColor,textFormat)"
+          }
+        },
+        // 分块外框
+        {
+          updateBorders: {
+            range: { sheetId, startRowIndex: base, endRowIndex: base + totalRows, startColumnIndex:0, endColumnIndex:5 },
+            top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+            right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } }
+          }
+        }
+      ]
+    }
   });
 
   // 下一块起始行（空一行）
@@ -459,8 +514,11 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
 // ========== Main ==========
 (async()=>{
   console.log("[INFO] Run start", todayStr(), "USE_PLAYWRIGHT=", USE_PW, "TZ=", TZ);
-
   let row=1;
+
+  // 准备当日工作表：清空内容与样式
+  const { sheetTitle, sheetId } = await ensureToday();
+  await clearTodaySheet(sheetTitle, sheetId);
 
   // 1) 沪深300（中国10Y + ERP_TARGET_CN）
   const pe_hs = await peHS300();
@@ -481,14 +539,12 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
   row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, null); // 暂无 ROE → 因子=1
 
-  // 4) 中概互联网（CSIH30533：中国10Y + ERP(China)）
+  // 4) 中概互联网（CSIH30533：中国口径）
   const pe_cxin = await peChinaInternet();
   const rf_cn2  = await rfCN();
   const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
   const roe_cxin = await roeCXIN();
   row = await writeBlock(row,"中概互联网", pe_cxin, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link, roe_cxin);
 
-  console.log("[DONE]", todayStr(), {
-    hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cxin?.v
-  });
+  console.log("[DONE]", todayStr(), { hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cxin?.v });
 })();
