@@ -1,15 +1,16 @@
 /**
  * Version History
- * V2.7.16 - Gemini Debugging Snapshot
- *  - The script no longer crashes, but returns no data.
- *  - Added a "debugging snapshot" to fetchVCMapDOM to save a screenshot and the HTML content.
- *    This allows us to see what the script sees and diagnose the root cause.
+ * V2.7.17 - Gemini Final Debugging Step
+ *  - Added a check in the Main function. If vcMap is empty after scraping,
+ *    the script will exit with error code 1.
+ *  - This forces the GitHub Actions step to be marked as "failed",
+ *    which in turn triggers the `if: failure()` condition to upload debug artifacts.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
-import fs from "fs"; // <-- 增加fs模块用于保存文件
+import fs from "fs";
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -20,7 +21,6 @@ const dbg    = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
 const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
 
-// 目标指数：别名（中文/英文/代码）用于 DOM 文本匹配
 const VC_TARGETS = {
   SH000300: ["沪深300", "上证沪深300", "SH000300", "沪深 300"],
   SP500:    ["标普500", "SP500", "S&P500", "S&P 500", "标准普尔500"],
@@ -49,7 +49,7 @@ const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();       return s?Number(s):null; })();
 const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
-const ROE_JP = numOr(process.env.ROE_JP, null);   // 小数，如 0.10
+const ROE_JP = numOr(process.env.ROE_JP, null);
 
 // ===== Sheets =====
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -99,7 +99,6 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
-// ===== Value Center：Playwright DOM（按名称/代码抓行 → PE/ROE）=====
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -113,13 +112,11 @@ async function fetchVCMapDOM(){
   await pg.waitForLoadState('networkidle').catch(()=>{});
   await pg.waitForTimeout(1000);
 
-  // V-- 新增的调试快照代码 --V
   console.log("[DEBUG] Taking snapshot before evaluation...");
   await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
   const html = await pg.content();
   fs.writeFileSync('debug_page.html', html);
   console.log("[DEBUG] Snapshot 'debug_screenshot.png' and 'debug_page.html' saved.");
-  // A-- 新增的调试快照代码 --A
 
   const recs = await pg.evaluate((args)=>{
     const { targets, hrefs } = args;
@@ -176,7 +173,6 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP* =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -237,7 +233,6 @@ async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527,
 async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
-// ===== Nikkei：PER（DOM-only）=====
 async function peNikkei(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -261,33 +256,25 @@ async function peNikkei(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
 }
 
-// ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
-
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
-
   let target = erpStar;
   if(label==="沪深300" || label==="中概互联网" || label==="恒生科技") target = ERP_TARGET_CN;
-
   const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;
-
   const ep = Number.isFinite(pe) ? 1/pe : null;
   const factor = (roe!=null && roe>0) ? (roe/ROE_BASE) : 1;
   const factorDisp = (roe!=null && roe>0) ? Number(factor.toFixed(2)) : "";
-
   const peBuy  = (rf!=null && target!=null) ? Number((1/(rf+target+DELTA)*factor).toFixed(2)) : null;
   const peSell = (rf!=null && target!=null && (rf+target-DELTA)>0) ? Number((1/(rf+target-DELTA)*factor).toFixed(2)) : null;
   const fairRange = (peBuy!=null && peSell!=null) ? `${peBuy} ~ ${peSell}` : "";
-
   let status="需手动更新";
   if(Number.isFinite(pe) && peBuy!=null && peSell!=null){
     if (pe <= peBuy) status="🟢 买点（低估）";
     else if (pe >= peSell) status="🔴 卖点（高估）";
     else status="🟡 持有（合理）";
   }
-
   const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
@@ -308,7 +295,6 @@ async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeR
   ];
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
-
   const requests = [];
   [2,3,4,5,10,11].forEach(i=>{ const r=(startRow-1)+i;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
@@ -324,11 +310,9 @@ async function writeBlock(startRow,label,peRes,rfRes,erpStar,erpTag,erpLink,roeR
     left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
     right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-
   return { nextRow: end + 2, judgment: status, pe };
 }
 
-// ===== Email =====
 async function sendEmailIfEnabled(lines){
   const { SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,MAIL_TO,MAIL_FROM_NAME,MAIL_FROM_EMAIL,FORCE_EMAIL } = process.env;
   if(!SMTP_HOST||!SMTP_PORT||!SMTP_USER||!SMTP_PASS||!MAIL_TO){ dbg("[MAIL] skip env"); return; }
@@ -353,13 +337,18 @@ async function sendEmailIfEnabled(lines){
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
 
-  // VC：DOM 直接取行
   let vcMap = {};
   if (USE_PW) {
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
+    
+    // V-- 新增的检查逻辑 --V
+    if (Object.keys(vcMap).length === 0) {
+      console.error("[ERROR] Scraping from Value Center failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
+      process.exit(1);
+    }
+    // A-- 新增的检查逻辑 --A
   }
 
-  // 1) HS300（VC；CN10Y；ERP* China）
   const rec_hs = vcMap["SH000300"];
   const pe_hs = rec_hs?.pe ? { v: rec_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SH000300")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   const rf_cn  = await rfCN();
@@ -367,7 +356,6 @@ async function sendEmailIfEnabled(lines){
   let r = await writeBlock(row,"沪深300", pe_hs, rf_cn, ERP_TARGET_CN, "真实", null, roe_hs);
   row = r.nextRow; const j_hs = r.judgment; const pv_hs = r.pe;
 
-  // 2) SP500（VC；US10Y；ERP* US）
   const rec_sp = vcMap["SP500"];
   const pe_spx = rec_sp?.pe ? { v: rec_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SP500")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
   const rf_us  = await rfUS(); const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
@@ -375,13 +363,11 @@ async function sendEmailIfEnabled(lines){
   r = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link, roe_spx);
   row = r.nextRow; const j_sp = r.judgment; const pv_sp = r.pe;
 
-  // 3) Nikkei（官方 PER；ROE 可覆写）
   const pe_nk = await peNikkei(); const rf_jp  = await rfJP(); const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
   const roe_nk = (ROE_JP!=null) ? { v:ROE_JP, tag:"覆写", link:"—" } : { v:null, tag:"兜底", link:"—" };
   r = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, roe_nk);
   row = r.nextRow; const j_nk = r.judgment; const pv_nk = r.pe;
 
-  // 4) 中概互联网（VC；CN10Y；ERP* China）
   const rec_cx = vcMap["CSIH30533"];
   const pe_cx = rec_cx?.pe ? { v: rec_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC CSIH30533")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   const rf_cn2  = await rfCN(); const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
@@ -389,7 +375,6 @@ async function sendEmailIfEnabled(lines){
   r = await writeBlock(row,"中概互联网", pe_cx, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link, roe_cx);
   row = r.nextRow; const j_cx = r.judgment; const pv_cx = r.pe;
 
-  // 5) 恒生科技（VC；与中概同口径：CN10Y；ERP* China）
   const rec_hst = vcMap["HSTECH"];
   const pe_hst = rec_hst?.pe ? { v: rec_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC HSTECH")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN();
