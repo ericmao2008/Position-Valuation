@@ -1,80 +1,17 @@
 /**
  * Version History
+ * V2.7.5
+ *  - 修复：Value Center 表格列位错误（应为 PE=第3列、ROE=第8列），导致 HS300/SPX/CSIH/HSTECH 取值为空
+ *  - 其余口径与逻辑与 V2.7.4 一致：VC-only（除 Nikkei），判定基于区间，邮件正文含判定
+ *
  * V2.7.4
- *  - 统一改为 “表格解析” 的 Value Center 抓取（仅 HS300/SP500/CSIH30533/HSTECH）：
- *      * 通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定对应 <tr>
- *      * 第 2 列取 PE（小数）；第 7 列取 ROE（百分比 → 小数）
- *      * HTTP 优先，如需再 Playwright 打开同页读取 page.content() 再解析
- *  - 口径：HS300/CSIH30533/HSTECH → r_f=中国10Y，ERP*=China；SP500 → r_f=US10Y，ERP*=US
- *  - Nikkei 仍用官方档案页 PER；ROE 暂用 ROE_JP（小数）可覆写
- *  - 判定：基于 P/E 与 [买点, 卖点] 区间；邮件正文包含判定；DEBUG 保留
+ *  - 改为 “表格解析” 的 VC 抓取：通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定行
+ *    *（当时误设 PE=第2列/ROE=第7列，此版已纠正为 PE=第3列/ROE=第8列）*
+ *  - 口径：HS300/CSIH/HSTECH → CN10Y + China ERP*；SP500 → US10Y + US ERP*
+ *  - Nikkei：官方档案页 PER；ROE 可覆写 ROE_JP（小数）
+ *  - 判定：基于 P/E 与 [买点, 卖点]；邮件正文含判定；DEBUG 保留
  *
- * V2.7.3
- *  - 修复：重复 import nodemailer
- *
- * V2.7.2
- *  - 修复 peNikkei 未定义；Value Center-only（除 Nikkei）；HSTECH 与中概口径一致
- *
- * V2.7.1
- *  - 修复 roeFromDanjuan 未定义；保留 Value Center 优先、邮件判定、恒生科技分块
- *
- * V2.7.0-test
- *  - 新增恒生科技（HSTECH）；Value Center 优先抓取；邮件正文加入判定
- *
- * V2.6.11
- *  - 修复：P/E 抓取函数占位导致 undefined；恢复并加固四个 pe 函数
- *
- * V2.6.10
- *  - 修复：CSIH30533 的 ROE(TTM) 丢失（点击 ROE tab + JSON 优先 + 3%~40% 过滤）
- *  - 邮件：支持 MAIL_FROM_EMAIL/MAIL_FROM_NAME；text+html；verify + DEBUG
- *
- * V2.6.9
- *  - 判定：基于 P/E 与 [买点, 卖点] 区间；内建邮件 DEBUG（verify/send/FORCE_EMAIL）
- *
- * V2.6.8
- *  - 修复：中概 ROE 偶发抓成 30%（更严格匹配与范围过滤）
- *
- * V2.6.7
- *  - 去除“中枢（对应P/E上限）”；仅保留买点/卖点/合理区间；公式写入说明
- *
- * V2.6.6
- *  - 指数行高亮；去表头行；ROE 百分比、因子小数；版本日志保留
- *
- * V2.6.5
- *  - 清空当日 Sheet（值+样式+边框）；统一 totalRows；每块后留 1 空行
- *
- * V2.6.4
- *  - 修复写入范围与实际行数不一致
- *
- * V2.6.3
- *  - 方案B：加入“合理PE（ROE因子）”；在说明中写明公式
- *
- * V2.6.2
- *  - 去除多余 P/E 行；每块加粗浅灰与外框；曾并行显示“原始阈值/ROE因子阈值”
- *
- * V2.6.1 (hotfix)
- *  - 百分比格式修正；ROE(TTM) 抓取增强（Playwright/HTTP）
- *
- * V2.6
- *  - 引入 ROE 因子：PE_limit = 1/(r_f+ERP*) × (ROE/ROE_BASE)
- *
- * V2.5
- *  - CSIH30533 切中国口径：r_f=中国10Y，ERP*=China
- *
- * V2.4
- *  - 新增 CSIH30533 分块；多路兜底
- *
- * V2.3
- *  - δ → P/E 空间三阈值
- *
- * V2.2
- *  - Nikkei 修复；空串不写 0
- *
- * V2.1
- *  - 新增 Nikkei 225
- *
- * V2.0
- *  - HS300 + SPX 基础版
+ * ……（更早版本历史略，已在仓库中保留）
  */
 
 import fetch from "node-fetch";
@@ -165,24 +102,27 @@ const VC_LINK = {
   CSIH30533:"/dj-valuation-table-detail/CSIH30533",
   HSTECH:   "/dj-valuation-table-detail/HSTECH"
 };
-// 解析整页表格为 map：{ code -> {pe, roe} }
+
 function parseValueCenterTable(html){
   const map = {};
   const rows = [...html.matchAll(/<tr[\s\S]*?<\/tr>/gi)].map(m=>m[0]);
   for(const [code, href] of Object.entries(VC_LINK)){
     const row = rows.find(tr => tr.includes(href));
     if(!row) continue;
-    // 抽取本行所有 <td>
-    const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m=>m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
-    if(tds.length < 7) continue; // 防御：列不足
-    const pe  = text2num(tds[1]);           // 第 2 列
-    const roe = pct2dec(tds[6]);            // 第 7 列（百分比）
-    if(Number.isFinite(pe) && pe>0 && pe<1000){
-      map[code] = { pe, roe: (roe>0 && roe<1)? roe : null };
+    const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+      .map(m=>m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
+    // 列序确认：1 名称｜2 类型｜3 PE｜4 PE%｜5 PB｜6 PB%｜7 股息率｜8 ROE｜9 预测PEG
+    if(tds.length >= 8){
+      const pe  = text2num(tds[2]);   // 第3列
+      const roe = pct2dec(tds[7]);    // 第8列
+      if(Number.isFinite(pe) && pe>0 && pe<1000){
+        map[code] = { pe, roe: (roe>0 && roe<1)? roe : null };
+      }
     }
   }
   return map;
 }
+
 async function fetchVCByTable(){
   // HTTP 优先
   try{
@@ -211,6 +151,7 @@ async function fetchVCByTable(){
   }
   return {};
 }
+
 let VC_CACHE = null;
 async function getVC(code){
   if(!VC_CACHE) VC_CACHE = await fetchVCByTable();
@@ -292,24 +233,9 @@ async function erpJP(){ // Japan ERP*
   return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------- 通过 VC 取值（除 Nikkei） ----------
-async function peFromVC(code, label){
-  const rec = await getVC(code);
-  if(rec?.pe) return { v: rec.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","${label}")` };
-  // 给一个可控的兜底（如设了 override）
-  const ov = { SH000300: PE_OVERRIDE_CN, SP500: PE_OVERRIDE_SPX, CSIH30533: PE_OVERRIDE_CXIN, HSTECH: PE_OVERRIDE_HSTECH }[code];
-  return { v: ov??"", tag:"兜底", link:`=HYPERLINK("${VC_URL}","${label}")` };
-}
-async function roeFromVC(code){
-  const rec = await getVC(code);
-  if(rec?.roe) return { v: rec.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","ValueCenter")` };
-  return { v:"", tag:"兜底", link:`=HYPERLINK("${VC_URL}","ValueCenter")` };
-}
-
 // ---------- Nikkei 专用：PE ----------
 async function peNikkei(){
   const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
-  // Playwright 优先
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -335,7 +261,6 @@ async function peNikkei(){
         return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
     }catch(e){ dbg("peNikkei PW err", e.message); }
   }
-  // HTTP 兜底
   try{
     const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:15000 });
     if(r.ok){
@@ -357,6 +282,7 @@ async function peNikkei(){
 // ---------- 写块（判定基于区间；样式/格式同前） ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
+
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
 
