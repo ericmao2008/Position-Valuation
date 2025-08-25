@@ -1,13 +1,10 @@
 /**
  * Version History
+ * V2.7.15 - Final Fix by Gemini
+ *  - Re-corrected the "Too many arguments" error in `page.evaluate`.
+ *  - The function call and its signature are now definitively correct.
  * V2.7.13
- *  - Configured by Gemini: Added "新经济" (HKHSSCNE) to the target list.
- *  - The core scraping engine is robust and requires no changes.
- * V2.7.12
- *  - Value Center：Playwright 在 DOM 中“按名称/代码”精确定位目标行，然后取 PE/ROE
- *      * 优先：按表头自动定位 “PE”“ROE” 列索引
- *      * 兜底：固定列位 PE=第3列、ROE=第8列
- *      * 行匹配：名称与代码多别名匹配
+ *  - Configured: Added "新经济" (HKHSSCNE) to the target list.
  */
 
 import fetch from "node-fetch";
@@ -29,14 +26,14 @@ const VC_TARGETS = {
   SP500:    ["标普500", "SP500", "S&P500", "S&P 500", "标准普尔500"],
   CSIH30533:["中概互联网50","中概互联50","中概互联网 50","CSIH30533"],
   HSTECH:   ["恒生科技","恒生科技指数","HSTECH","恒生 科技"],
-  HKHSSCNE: ["新经济", "HKHSSCNE"] // <-- 新增目标
+  HKHSSCNE: ["新经济", "HKHSSCNE"]
 };
 const VC_HREF = {
   SH000300:"/dj-valuation-table-detail/SH000300",
   SP500:"/dj-valuation-table-detail/SP500",
   CSIH30533:"/dj-valuation-table-detail/CSIH30533",
   HSTECH:"/dj-valuation-table-detail/HSTECH",
-  HKHSSCNE:"/dj-valuation-table-detail/HKHSSCNE" // <-- 新增目标
+  HKHSSCNE:"/dj-valuation-table-detail/HKHSSCNE"
 };
 
 // ===== Policy / Defaults =====
@@ -109,7 +106,6 @@ async function fetchVCMapDOM(){
   const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
   const pg  = await ctx.newPage();
   await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
-  // 等待表/锚点
   await Promise.race([
     pg.waitForSelector('table', { timeout: 8000 }),
     ...Object.values(VC_HREF).map(h => pg.waitForSelector(`a[href*="${h}"]`, { timeout: 8000 }).catch(()=>{}))
@@ -117,11 +113,14 @@ async function fetchVCMapDOM(){
   await pg.waitForLoadState('networkidle').catch(()=>{});
   await pg.waitForTimeout(600);
 
-  const recs = await pg.evaluate((VC_TARGETS, VC_HREF)=>{
+  // V-- CORRECTED SECTION --V
+  const recs = await pg.evaluate((args)=>{
+    // Destructure the arguments from the single object passed in
+    const { targets, hrefs } = args;
+
     const norm = s => (s||"").replace(/\s+/g,"").toUpperCase();
 
-    // 读表头，定位列
-    let peIdx = 2, roeIdx = 7; // 退路
+    let peIdx = 2, roeIdx = 7;
     const ths = Array.from(document.querySelectorAll("th")).map(th=>norm(th.textContent));
     if(ths.length){
       const idxBy = kw => ths.findIndex(t => t.includes(kw));
@@ -131,13 +130,13 @@ async function fetchVCMapDOM(){
       if(iROE>=0) roeIdx = iROE;
     }
 
-    // 遍历每个目标：先按 <a href> 找行；否则按文本包含别名匹配
     const out = {};
     const rowFor = (code, aliases) => {
-      const href = VC_HREF[code];
-      let a = document.querySelector(`a[href*="${href}"]`);
-      if(a) return a.closest("tr");
-      // 按文本匹配
+      const href = hrefs[code];
+      if (href) {
+        let a = document.querySelector(`a[href*="${href}"]`);
+        if(a) return a.closest("tr");
+      }
       const test = new RegExp(aliases.map(x=>x.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")).join("|"));
       const rows = Array.from(document.querySelectorAll("tr"));
       for(const tr of rows){
@@ -150,19 +149,19 @@ async function fetchVCMapDOM(){
     const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
     const pct2d = s => { const m=String(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=parseFloat(m[1])/100; return (v>0&&v<1)?v:null; };
 
-    for(const [code, aliases] of Object.entries(VC_TARGETS)){
+    for(const [code, aliases] of Object.entries(targets)){
       const tr = rowFor(code, aliases.map(norm));
       if(!tr) continue;
       const tds = Array.from(tr.querySelectorAll("td")).map(td=>td.innerText.trim());
       if(!tds.length) continue;
 
-      // 取值
       const pe  = toNum(tds[peIdx]  ?? tds[2]);
       const roe = pct2d(tds[roeIdx] ?? tds[7]);
       if(pe && pe>0 && pe<1000) out[code] = { pe, roe:(roe&&roe>0&&roe<1)?roe:null };
     }
     return out;
-  }, VC_TARGETS, VC_HREF);
+  }, { targets: VC_TARGETS, hrefs: VC_HREF }); // Pass a SINGLE object
+  // A-- CORRECTED SECTION --A
 
   await br.close();
   dbg("VC map (DOM)", recs);
@@ -399,7 +398,9 @@ async function sendEmailIfEnabled(lines){
   r = await writeBlock(row,"恒生科技", pe_hst, rf_cn3, erp_hk_v, erp_hk_tag, erp_hk_link, roe_hst);
   row = r.nextRow; const j_hst = r.judgment; const pv_hst = r.pe;
   
-  // NOTE: You would add a new block here for "新经济" if you want it in your sheet.
+  // You can add a block for "新经济" here if you want it in the sheet/email
+  // const rec_ne = vcMap["HKHSSCNE"];
+  // ...
 
   console.log("[DONE]", todayStr(), {
     hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cx?.v, hstech_pe: pe_hst?.v
