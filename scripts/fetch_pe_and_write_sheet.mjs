@@ -1,11 +1,112 @@
 /**
  * Version History
+ * V2.9.6 - Nikkei ROE Calculation
+ * - Implemented the proposed logic to calculate Nikkei ROE from official PE and PB values.
+ * - Added a new `pbNikkei` function to scrape the PBR value from indexes.nikkei.co.jp.
+ * - The Main block now fetches both PE and PB for Nikkei and calculates ROE = PB / PE.
+ * - Removed the manual `ROE_JP` environment variable override for Nikkei.
+ *
  * V2.9.5 - Feature Expansion: Added NDX, DAX, India Indices
  * - Added Nasdaq 100, Germany DAX, and MSCI India to the VC_TARGETS.
  * - Created new functions (rfDE, rfIN, erpDE, erpIN) to fetch bond yields and ERPs for Germany and India.
  * - Updated the Main block to process, write, and report on all 8 indices.
  * - Refined `writeBlock` to handle labels for different countries.
  * - Added new PE_OVERRIDE environment variables for the new indices.
+ *
+ * V2.9.4 - UI Polish
+ * - Modified the '判定' (Judgment) field in `writeBlock` to only show the emoji (🟢, 🔴, 🟡) 
+ * and remove the descriptive text, as requested. This affects both the sheet and email summary.
+ *
+ * V2.9.3 - Feature Removal
+ * - Removed the "新经济" (New Economy) index from all processing sections as requested.
+ * - Cleaned up related constants and logic in the Main function.
+ * * V2.9.2 - Final Formatting & Feature Polish
+ * - Fixed off-by-one error in format application logic within `writeBlock`.
+ * - ROE rows are now correctly formatted as percentages (0.00%).
+ * - ROE Factor row is now correctly formatted as a decimal (0.00).
+ * - Added the "新经济" index to the main processing loop to ensure it's written to the sheet.
+ * - Enhanced email summary to include ROE values for a more complete overview.
+ * * V2.9.1 - The Great Refactor (Complete File)
+ * - Final complete version by Gemini, adhering to the principle of providing full files only.
+ * - Rewrote the core scraping logic in `fetchVCMapDOM` to adapt to the new div-based layout on danjuanfunds.com.
+ * - Logic now locates data by finding specific class name prefixes (e.g., "pe___", "roe___"), which is more robust.
+ * - Full logic for all 5 target indices is present in the Main function.
+ *
+ * V2.7.4
+ *  - 统一改为 “表格解析” 的 Value Center 抓取（仅 HS300/SP500/CSIH30533/HSTECH）：
+ *      * 通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定对应 <tr>
+ *      * 第 2 列取 PE（小数）；第 7 列取 ROE（百分比 → 小数）
+ *      * HTTP 优先，如需再 Playwright 打开同页读取 page.content() 再解析
+ *  - 口径：HS300/CSIH30533/HSTECH → r_f=中国10Y，ERP*=China；SP500 → r_f=US10Y，ERP*=US
+ *  - Nikkei 仍用官方档案页 PER；ROE 暂用 ROE_JP（小数）可覆写
+ *  - 判定：基于 P/E 与 [买点, 卖点] 区间；邮件正文包含判定；DEBUG 保留
+ *
+ * V2.7.3
+ *  - 修复：重复 import nodemailer
+ *
+ * V2.7.2
+ *  - 修复 peNikkei 未定义；Value Center-only（除 Nikkei）；HSTECH 与中概口径一致
+ *
+ * V2.7.1
+ *  - 修复 roeFromDanjuan 未定义；保留 Value Center 优先、邮件判定、恒生科技分块
+ *
+ * V2.7.0-test
+ *  - 新增恒生科技（HSTECH）；Value Center 优先抓取；邮件正文加入判定
+ *
+ * V2.6.11
+ *  - 修复：P/E 抓取函数占位导致 undefined；恢复并加固四个 pe 函数
+ *
+ * V2.6.10
+ *  - 修复：CSIH30533 的 ROE(TTM) 丢失（点击 ROE tab + JSON 优先 + 3%~40% 过滤）
+ *  - 邮件：支持 MAIL_FROM_EMAIL/MAIL_FROM_NAME；text+html；verify + DEBUG
+ *
+ * V2.6.9
+ *  - 判定：基于 P/E 与 [买点, 卖点] 区间；内建邮件 DEBUG（verify/send/FORCE_EMAIL）
+ *
+ * V2.6.8
+ *  - 修复：中概 ROE 偶发抓成 30%（更严格匹配与范围过滤）
+ *
+ * V2.6.7
+ *  - 去除“中枢（对应P/E上限）”；仅保留买点/卖点/合理区间；公式写入说明
+ *
+ * V2.6.6
+ *  - 指数行高亮；去表头行；ROE 百分比、因子小数；版本日志保留
+ *
+ * V2.6.5
+ *  - 清空当日 Sheet（值+样式+边框）；统一 totalRows；每块后留 1 空行
+ *
+ * V2.6.4
+ *  - 修复写入范围与实际行数不一致
+ *
+ * V2.6.3
+ *  - 方案B：加入“合理PE（ROE因子）”；在说明中写明公式
+ *
+ * V2.6.2
+ *  - 去除多余 P/E 行；每块加粗浅灰与外框；曾并行显示“原始阈值/ROE因子阈值”
+ *
+ * V2.6.1 (hotfix)
+ *  - 百分比格式修正；ROE(TTM) 抓取增强（Playwright/HTTP）
+ *
+ * V2.6
+ *  - 引入 ROE 因子：PE_limit = 1/(r_f+ERP*) × (ROE/ROE_BASE)
+ *
+ * V2.5
+ *  - CSIH30533 切中国口径：r_f=中国10Y，ERP*=China
+ *
+ * V2.4
+ *  - 新增 CSIH30533 分块；多路兜底
+ *
+ * V2.3
+ *  - δ → P/E 空间三阈值
+ *
+ * V2.2
+ *  - Nikkei 修复；空串不写 0
+ *
+ * V2.1
+ *  - 新增 Nikkei 225
+ *
+ * V2.0
+ *  - HS300 + SPX 基础版
  */
 
 import fetch from "node-fetch";
@@ -51,7 +152,6 @@ const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"")
 const PE_OVERRIDE_NDX     = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_DAX     = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_IN      = (()=>{ const s=(process.env.PE_OVERRIDE_IN??"").trim(); return s?Number(s):null; })();
-const ROE_JP = numOr(process.env.ROE_JP, null);
 
 // ===== Sheets =====
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -101,7 +201,6 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
-// ===== Value Center：Playwright DOM（适配最终版DIV布局）=====
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -231,6 +330,7 @@ async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527,
 async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
+// ===== Nikkei：PE & PB (DOM-only) =====
 async function peNikkei(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -250,8 +350,31 @@ async function peNikkei(){
     const n = parseFloat(txt); return Number.isFinite(n)? n : null;
   });
   await br.close();
-  if(Number.isFinite(val) && val>0 && val<1000) return { v:val, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
-  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+  if(Number.isFinite(val) && val>0 && val<1000) return { v:val, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER")` };
+}
+
+async function pbNikkei(){
+  const { chromium } = await import("playwright");
+  const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+  const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
+  const pg  = await ctx.newPage();
+  const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr";
+  await pg.goto(url, { waitUntil: 'domcontentloaded' });
+  await pg.waitForSelector("table", { timeout: 8000 }).catch(()=>{});
+  await pg.waitForTimeout(600);
+  const val = await pg.evaluate(()=>{
+    const tbl = document.querySelector("table"); if(!tbl) return null;
+    const rows = Array.from(tbl.querySelectorAll("tbody tr"));
+    const row = rows[rows.length-1]; if(!row) return null;
+    const tds = Array.from(row.querySelectorAll("td"));
+    if(tds.length<3) return null;
+    const txt = (tds[2].innerText||"").replace(/,/g,"").trim();
+    const n = parseFloat(txt); return Number.isFinite(n)? n : null;
+  });
+  await br.close();
+  if(Number.isFinite(val) && val>0 && val<1000) return { v:val, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PBR")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PBR")` };
 }
 
 // ===== 写块 & 判定 =====
@@ -283,7 +406,7 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
     ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点=1/(r_f+ERP*+δ)×factor","—"],
     ["卖点PE下限（含ROE因子）", peSell ?? "", (peSell!=null)?"真实":"兜底", "卖点=1/(r_f+ERP*−δ)×factor","—"],
     ["合理PE区间（含ROE因子）", fairRange, (peBuy!=null && peSell!=null)?"真实":"兜底", "买点上限 ~ 卖点下限","—"],
-    ["ROE（TTM）", roe ?? "", (roe!=null)?"真实":"兜底", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
+    ["ROE（TTM）", roe ?? "", roeRes?.tag || "—", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
     ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],
     ["ROE倍数因子 = ROE/ROE基准", factorDisp, (factorDisp!=="")?"真实":"兜底", "例如 16.4%/12% = 1.36","—"],
     ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点","—"],
@@ -350,6 +473,7 @@ async function sendEmailIfEnabled(lines){
   const rf_us_promise = rfUS();
   const erp_us_promise = erpUS();
   const pe_nk_promise = peNikkei();
+  const pb_nk_promise = pbNikkei();
   const rf_jp_promise = rfJP();
   const erp_jp_promise = erpJP();
   const rf_de_promise = rfDE();
@@ -380,9 +504,12 @@ async function sendEmailIfEnabled(lines){
   row = res_ndx.nextRow;
 
   // 4) Nikkei
-  let roe_nk = (ROE_JP!=null) ? { v:ROE_JP, tag:"覆写", link:"—" } : { v:null, tag:"兜底", link:"—" };
+  const pe_nk = await pe_nk_promise;
+  const pb_nk = await pb_nk_promise;
+  let roe_nk = { v: null, tag: "计算值", link: pe_nk.link };
+  if (pe_nk && pe_nk.v && pb_nk && pb_nk.v) { roe_nk.v = pb_nk.v / pe_nk.v; }
   const erp_jp = await erp_jp_promise;
-  let res_nk = await writeBlock(row, "日经指数", "JP", await pe_nk_promise, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
+  let res_nk = await writeBlock(row, "日经指数", "JP", pe_nk, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
   row = res_nk.nextRow;
 
   // 5) 中概互联50
