@@ -1,15 +1,15 @@
 /**
  * Version History
- * V2.7.15 - Final Fix by Gemini
- *  - Re-corrected the "Too many arguments" error in `page.evaluate`.
- *  - The function call and its signature are now definitively correct.
- * V2.7.13
- *  - Configured: Added "新经济" (HKHSSCNE) to the target list.
+ * V2.7.16 - Gemini Debugging Snapshot
+ *  - The script no longer crashes, but returns no data.
+ *  - Added a "debugging snapshot" to fetchVCMapDOM to save a screenshot and the HTML content.
+ *    This allows us to see what the script sees and diagnose the root cause.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
+import fs from "fs"; // <-- 增加fs模块用于保存文件
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -111,15 +111,19 @@ async function fetchVCMapDOM(){
     ...Object.values(VC_HREF).map(h => pg.waitForSelector(`a[href*="${h}"]`, { timeout: 8000 }).catch(()=>{}))
   ]).catch(()=>{});
   await pg.waitForLoadState('networkidle').catch(()=>{});
-  await pg.waitForTimeout(600);
+  await pg.waitForTimeout(1000);
 
-  // V-- CORRECTED SECTION --V
+  // V-- 新增的调试快照代码 --V
+  console.log("[DEBUG] Taking snapshot before evaluation...");
+  await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
+  const html = await pg.content();
+  fs.writeFileSync('debug_page.html', html);
+  console.log("[DEBUG] Snapshot 'debug_screenshot.png' and 'debug_page.html' saved.");
+  // A-- 新增的调试快照代码 --A
+
   const recs = await pg.evaluate((args)=>{
-    // Destructure the arguments from the single object passed in
     const { targets, hrefs } = args;
-
     const norm = s => (s||"").replace(/\s+/g,"").toUpperCase();
-
     let peIdx = 2, roeIdx = 7;
     const ths = Array.from(document.querySelectorAll("th")).map(th=>norm(th.textContent));
     if(ths.length){
@@ -129,7 +133,6 @@ async function fetchVCMapDOM(){
       if(iPE>=0) peIdx  = iPE;
       if(iROE>=0) roeIdx = iROE;
     }
-
     const out = {};
     const rowFor = (code, aliases) => {
       const href = hrefs[code];
@@ -145,23 +148,19 @@ async function fetchVCMapDOM(){
       }
       return null;
     };
-
     const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
     const pct2d = s => { const m=String(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=parseFloat(m[1])/100; return (v>0&&v<1)?v:null; };
-
     for(const [code, aliases] of Object.entries(targets)){
       const tr = rowFor(code, aliases.map(norm));
       if(!tr) continue;
       const tds = Array.from(tr.querySelectorAll("td")).map(td=>td.innerText.trim());
       if(!tds.length) continue;
-
       const pe  = toNum(tds[peIdx]  ?? tds[2]);
       const roe = pct2d(tds[roeIdx] ?? tds[7]);
       if(pe && pe>0 && pe<1000) out[code] = { pe, roe:(roe&&roe>0&&roe<1)?roe:null };
     }
     return out;
-  }, { targets: VC_TARGETS, hrefs: VC_HREF }); // Pass a SINGLE object
-  // A-- CORRECTED SECTION --A
+  }, { targets: VC_TARGETS, hrefs: VC_HREF });
 
   await br.close();
   dbg("VC map (DOM)", recs);
@@ -398,10 +397,6 @@ async function sendEmailIfEnabled(lines){
   r = await writeBlock(row,"恒生科技", pe_hst, rf_cn3, erp_hk_v, erp_hk_tag, erp_hk_link, roe_hst);
   row = r.nextRow; const j_hst = r.judgment; const pv_hst = r.pe;
   
-  // You can add a block for "新经济" here if you want it in the sheet/email
-  // const rec_ne = vcMap["HKHSSCNE"];
-  // ...
-
   console.log("[DONE]", todayStr(), {
     hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cx?.v, hstech_pe: pe_hst?.v
   });
