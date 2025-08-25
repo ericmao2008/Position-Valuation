@@ -1,8 +1,7 @@
-// Version: V2.4
+// Version: V2.5
 // Change:
-// 1) 新增「中概互联网（CSIH30533）」指数：PE 来自 Danjuan 估值页；r_f 用美国10Y；ERP* 用达摩达兰 China
-// 2) 为 CSIH30533 实现多路鲁棒抓取：Playwright DOM / "PE + 日期" 正则 / 内嵌 JSON "pe_ttm" / 文本邻近兜底
-// 3) 其余逻辑与 V2.3 保持一致（δ→P/E 三条阈值、Nikkei DOM&HTML、空值不写0、防 Infinity）
+// 1) 中概互联网（CSIH30533）无风险利率改为中国10Y (rfCN)，目标ERP改为达摩达兰 China (erpCN)
+// 2) 其余部分与 V2.4 保持一致（Nikkei DOM&HTML 抓取、δ→P/E 三条阈值、空值不写0、防 Infinity）
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
@@ -525,12 +524,11 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
   row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link);
 
-  // 4) 中概互联网（CSIH30533：美国10Y + ERP(China)）
+  // 4) 中概互联网（CSIH30533：中国10Y + ERP(China)）
   const pe_cxin = await peChinaInternet();
-  // r_f 采用美国 10Y（已在前面获取 rf_us，可复用；为避免跨写块变动，这里再取一次最稳）
-  const rf_us2  = await rfUS();
-  const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
-  row = await writeBlock(row,"中概互联网", pe_cxin, rf_us2, erp_cn_v, erp_cn_tag, erp_cn_link);
+  const rf_cn2  = await rfCN();  // 改为中国10Y
+  const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();  // 改为 China
+  row = await writeBlock(row,"中概互联网", pe_cxin, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link);
 
   console.log("[DONE]", todayStr(), {
     hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cxin?.v
