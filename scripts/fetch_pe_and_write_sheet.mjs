@@ -1,27 +1,35 @@
 /**
  * Version History
+ * V2.7.7
+ *  - 修复：上一版 batchUpdate requests 括号构造导致 SyntaxError（Unexpected token ']'）
+ *  - 保持：Value Center 表格解析（Playwright 打开 → 表头定位“PE/ROE”；失败退回固定列 PE=3/ROE=8）
+ *  - 口径：HS300/CSIH/HSTECH → CN10Y + China ERP*；SP500 → US10Y + US ERP*；Nikkei → 官方档案页 PER（ROE_JP 可覆写）
+ *  - 判定：基于 P/E 与 [买点, 卖点]；邮件正文包含判定；DEBUG 保留
+ *
  * V2.7.6
- *  - 修复 Value Center 未能抓到 PE/ROE：改为 Playwright 解析“表格 + 表头”方式
- *    • 等待表格加载 → 读取表头定位“PE”“ROE”列；失败则退回固定列位（PE=第3列，ROE=第8列）
- *    • 通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定目标 <tr>
- *    • HS300 / SP500 / CSIH30533 / HSTECH 只用 Value Center；日经维持官方档案页
- *  - 其它保持：口径、区间判定、邮件正文（含判定）、DEBUG 日志与回滚规范
- *
+ *  - Value Center 解析改为 Playwright 表格+表头方式
  * V2.7.5
- *  - 纠正 VC 表格列位（原错设 PE=2/ROE=7；应为 PE=3/ROE=8）
- *
+ *  - 纠正 VC 列位为 PE=第3列、ROE=第8列
  * V2.7.4
- *  - 初版表格解析（当时列位不对）
- *
- * …（更早版本历史保留在仓库注释中）
+ *  - 首次切到 VC 表格解析（当时列位不对）
+ * V2.7.3
+ *  - 修复重复 import nodemailer
+ * V2.7.2
+ *  - peNikkei 定义缺失修复；VC-only（除 Nikkei）
+ * V2.7.1
+ *  - 补回 roeFromDanjuan；邮件正文含判定；恒生科技分块
+ * V2.7.0-test
+ *  - 新增恒生科技；VC 优先抓取
+ * V2.6.11 ~ V2.0
+ *  - 保留在仓库注释中（HS300/SPX 起步、δ→区间、ROE 因子、邮件 DEBUG 等）
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
 
-// ---------- 全局 ----------
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+// ============ 全局 ============
+const UA     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const USE_PW = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
 const DEBUG  = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
 const TZ     = process.env.TZ || "Asia/Shanghai";
@@ -44,7 +52,7 @@ const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\
 const text2num = (s)=>{ const x=parseFloat((s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
 const pct2dec = (s)=>{ const m=(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=Number(m[1])/100; return (v>0 && v<1)? v : null; };
 
-// ---------- 参数口径 ----------
+// ============ 口径参数 ============
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
@@ -61,7 +69,7 @@ const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").tr
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
 const ROE_JP = numOr(process.env.ROE_JP, null);   // 小数，如 0.10
 
-// ---------- Sheets ----------
+// ============ Sheets ============
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
 const auth = new google.auth.JWT(
@@ -103,23 +111,18 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
-// ---------- Value Center：Playwright 解析表格 ----------
+// ============ VC：Playwright 解析表格（表头自动定位列位） ============
 async function fetchVCByTablePW(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
   const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
   const pg  = await ctx.newPage();
   await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
-
-  // 等待表格加载稳定
   await pg.waitForSelector("table", { timeout: 8000 }).catch(()=>{});
   await pg.waitForLoadState('networkidle').catch(()=>{});
   await pg.waitForTimeout(800);
-
   const html = await pg.content();
   await br.close();
-
-  // 解析
   return parseVCFromHTML(html);
 }
 
@@ -127,35 +130,30 @@ function parseVCFromHTML(html){
   const map = {};
   const rows = [...html.matchAll(/<tr[\s\S]*?<\/tr>/gi)].map(m=>m[0]);
 
-  // 尝试读取表头，确定 PE / ROE 列位
+  // 表头（若有 th 就用 th 定位列；否则退固定列位：PE=3，ROE=8）
   let headerRow = rows.find(tr => /<th/i.test(tr)) || "";
   let headers = [];
   if(headerRow){
     headers = [...headerRow.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi)]
-      .map(m=> strip(m[1]).trim().toUpperCase());
+      .map(m=> strip(m[1]).trim().toUpperCase().replace(/\s+/g,''));
   }
-  // 默认列位（你确认过）：PE=第3列(索引2)，ROE=第8列(索引7)
-  let peIdx = 2, roeIdx = 7;
-  if(headers.length > 0){
-    const findIdx = (name) => headers.findIndex(h => h.replace(/\s+/g,'')===name);
-    const peH = ["PE","PE(TTM)"];
-    const roeH= ["ROE"];
-    for(const n of peH){ const i = findIdx(n); if(i>=0){ peIdx=i; break; } }
-    for(const n of roeH){ const i = findIdx(n); if(i>=0){ roeIdx=i; break; } }
+  let peIdx = 2, roeIdx = 7;      // 退路：PE 第3列、ROE 第8列
+  if(headers.length){
+    const findIdx = (kw)=> headers.findIndex(h => h.includes(kw));
+    const iPE  = findIdx("PE");
+    const iROE = findIdx("ROE");
+    if(iPE  >= 0) peIdx  = iPE;
+    if(iROE >= 0) roeIdx = iROE;
   }
 
-  // 逐指数解析
   for(const [code, href] of Object.entries(VC_LINK)){
     const row = rows.find(tr => tr.includes(href));
     if(!row) continue;
     const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
       .map(m=> m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
-    if(tds.length === 0) continue;
-
-    // 兜底：如果表头没有 th，严格按固定列位
-    const pe  = text2num(tds[peIdx] ?? "");
+    if(!tds.length) continue;
+    const pe  = text2num(tds[peIdx]  ?? "");
     const roe = pct2dec (tds[roeIdx] ?? "");
-
     if(Number.isFinite(pe) && pe>0 && pe<1000){
       map[code] = { pe, roe: (roe>0 && roe<1)? roe : null };
     }
@@ -166,28 +164,20 @@ function parseVCFromHTML(html){
 let VC_CACHE = null;
 async function getVC(code){
   if(!VC_CACHE){
-    try{
-      VC_CACHE = await fetchVCByTablePW(); // 直接用 PW 解析表格，避免 SSR/CSR 差异
-      dbg("VC parsed map", VC_CACHE);
-    }catch(e){
-      dbg("VC PW parse failed", e.message);
-      VC_CACHE = {};
-    }
+    try{ VC_CACHE = await fetchVCByTablePW(); dbg("VC parsed map", VC_CACHE); }
+    catch(e){ dbg("VC PW parse failed", e.message); VC_CACHE = {}; }
   }
   return VC_CACHE[code] || null;
 }
 
-// ---------- r_f / ERP* 抓取 ----------
+// ============ r_f / ERP* ============
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
+    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/china-10-year-bond-yield","CN 10Y")' };
   }}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
 
@@ -197,10 +187,7 @@ async function rfUS(){ try{
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
+    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield","US 10Y")' };
   }}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
 
@@ -210,10 +197,7 @@ async function rfJP(){ try{
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){
-      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
-      if(near) v=Number(near[1])/100;
-    }
+    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/japan-10-year-bond-yield","JP 10Y")' };
   }}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
 
@@ -253,7 +237,7 @@ async function erpJP(){ try{
   }
   }catch{} return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
-// ---------- Nikkei：PER ----------
+// ============ Nikkei：PER ============
 async function peNikkei(){
   const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
   if (USE_PW) {
@@ -299,14 +283,13 @@ async function peNikkei(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
 }
 
-// ---------- 写块（判定基于区间；样式/格式同前） ----------
+// ============ 写块（判定基于区间） ============
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
 
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
 
-  // 口径：HS300/中概/恒生科技 用 China ERP*；SP500 用 US；日经用 Japan
   let target = erpStar;
   if(label==="沪深300" || label==="中概互联网" || label==="恒生科技") target = ERP_TARGET_CN;
 
@@ -327,7 +310,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     else status="🟡 持有（合理）";
   }
 
-  const values = [
+  const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
@@ -346,48 +329,65 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     ["判定", status, (Number.isFinite(pe) && peBuy!=null && peSell!=null)?"真实":"兜底", "基于 P/E 与区间","—"],
   ];
 
-  const totalRows = values.length;
-  const endRow = startRow + totalRows - 1;
-  await write(`'${sheetTitle}'!A${startRow}:E${endRow}`, values);
+  const end = startRow + rows.length - 1;
+  await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // 样式/格式
-  const base = startRow - 1;
-  const pctRowsAbs = [base+2, base+3, base+4, base+5, base+9, base+10];
-  const numberRowsAbs = [base+1, base+6, base+7, base+11];
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: { requests: [
-      ...pctRowsAbs.map(r => ({
-        repeatCell: {
-          range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-          cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
-          fields: "userEnteredFormat.numberFormat"
-        }
-      })),
-      ...numberRowsAbs.map(r => ({
-        repeatCell: {
-          range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-          cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
-          fields: "userEnteredFormat.numberFormat"
-        }
-      ])),
-      { repeatCell: {
-          range: { sheetId, startRowIndex: base+0, endRowIndex: base+1, startColumnIndex:0, endColumnIndex:5 },
-          cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
-          fields:"userEnteredFormat(backgroundColor,textFormat)" } },
-      { updateBorders: {
-          range: { sheetId, startRowIndex: base, endRowIndex: base + totalRows, startColumnIndex:0, endColumnIndex:5 },
-          top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-          bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-          left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-          right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } } }
-    ]}
+  // —— 样式：用数组拼 requests，避免括号错误 ——
+  const requests = [];
+
+  // 百分比：E/P(3)、r_f(4)、ERP*(5)、δ(6)、ROE(11)、ROE基准(12)
+  const pctRowIdx = [2,3,4,5,10,11].map(i => (startRow-1)+i);  // 0-based
+  pctRowIdx.forEach(r => {
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+        fields: "userEnteredFormat.numberFormat"
+      }
+    });
   });
 
-  return { nextRow: endRow + 2, judgment: status, pe };
+  // 数字：P/E(2)、买点(7)、卖点(8)、因子(13)
+  const numRowIdx = [1,6,7,12].map(i => (startRow-1)+i);
+  numRowIdx.forEach(r => {
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
+        fields: "userEnteredFormat.numberFormat"
+      }
+    });
+  });
+
+  // 指数行高亮
+  requests.push({
+    repeatCell: {
+      range: { sheetId, startRowIndex:(startRow-1)+0, endRowIndex:(startRow-1)+1, startColumnIndex:0, endColumnIndex:5 },
+      cell:  { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+      fields:"userEnteredFormat(backgroundColor,textFormat)"
+    }
+  });
+
+  // 分块外框
+  requests.push({
+    updateBorders: {
+      range: { sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
+      top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } }
+    }
+  });
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: { requests }
+  });
+
+  return { nextRow: end + 2, judgment: status, pe };
 }
 
-// ---------- 邮件 ----------
+// ============ 邮件 ============
 async function sendEmailIfEnabled(lines){
   const {
     SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
@@ -430,7 +430,7 @@ async function sendEmailIfEnabled(lines){
   }catch(e){ console.error("[MAIL] send error:", e); }
 }
 
-// ---------- Main ----------
+// ============ Main ============
 (async()=>{
   console.log("[INFO] Run start", todayStr(), "USE_PLAYWRIGHT=", USE_PW, "TZ=", TZ);
 
