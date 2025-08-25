@@ -1,72 +1,61 @@
 name: Daily Valuation (09:30 & 16:30 Beijing)
 
 on:
-  schedule:
-    - cron: '30 1 * * *'   # 09:30 CST (UTC+8)
-    - cron: '30 8 * * *'   # 16:30 CST (UTC+8)
-  workflow_dispatch: {}
+  schedule:
+    - cron: '30 1 * * *' # 09:30 CST (UTC+8)
+    - cron: '30 8 * * *' # 16:30 CST (UTC+8)
+  workflow_dispatch: {}
 
 # 只保留“最新一条”，避免半途中断/半页
 concurrency:
-  group: daily-valuation-${{ github.ref }}
-  cancel-in-progress: true
+  group: daily-valuation-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-    env:
-      # Google
-      GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-      GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
-      SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
+    env:
+      # Google
+      GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+      GOOGLE_PRIVATE_KEY: ${{ secrets.GOOGLE_PRIVATE_KEY }}
+      SPREADSHEET_ID: ${{ vars.SPREADSHEET_ID }}
 
-      # 邮件（可选；不填自动跳过）
-      SMTP_HOST:           ${{ secrets.SMTP_HOST }}
-      SMTP_PORT:           ${{ secrets.SMTP_PORT }}
-      SMTP_USER:           ${{ secrets.SMTP_USER }}
-      SMTP_PASS:           ${{ secrets.SMTP_PASS }}
-      MAIL_TO:             ${{ vars.MAIL_TO }}
-      MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
+      # 邮件（可选；不填自动跳过）
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      MAIL_TO: ${{ vars.MAIL_TO }}
+      MAIL_FROM_NAME: ${{ vars.MAIL_FROM_NAME }}
 
-      # 判定参数（留空→脚本默认 5.27% / 0.50%）
-      ERP_TARGET:          ${{ vars.ERP_TARGET }}
-      DELTA:               ${{ vars.DELTA }}
-      TZ:                  Asia/Shanghai
+      # 判定参数（留空→脚本默认 5.27% / 0.50%）
+      ERP_TARGET: ${{ vars.ERP_TARGET }}
+      DELTA: ${{ vars.DELTA }}
+      TZ: Asia/Shanghai
 
-      # 兜底（小数）
-      RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}        # HS300 中国10Y兜底（如 0.0178）
-      RF_US:               ${{ vars.RF_US }}              # 美国10Y兜底（如 0.0425）
-      PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}        # HS300 PE兜底（如 13.97）
-      PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}    # SPX   PE兜底（如 28.15）
+      # 兜底（小数）
+      RF_OVERRIDE: ${{ vars.RF_OVERRIDE }} # HS300 中国10Y兜底（如 0.0178）
+      RF_US: ${{ vars.RF_US }} # 美国10Y兜底（如 0.0425）
+      PE_OVERRIDE: ${{ vars.PE_OVERRIDE }} # HS300 PE兜底（如 13.97）
+      PE_OVERRIDE_SPX: ${{ vars.PE_OVERRIDE_SPX }} # SPX PE兜底（如 28.15）
 
-      # 开 Playwright（抓红圈 PE）
-      USE_PLAYWRIGHT:      '1'
-      DEBUG_VERBOSE:       '1'
+      # 开 Playwright（抓红圈 PE）
+      USE_PLAYWRIGHT: '1'
+      DEBUG_VERBOSE: '1'
 
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      - name: Install deps
-        run: npm ci || npm i
-      - name: Install Playwright Chromium
-        run: npx playwright install chromium --with-deps
-      - name: Run fetch & write (with one retry)
-        run: |
-          set -e
-          node scripts/fetch_pe_and_write_sheet.mjs || (echo "retry in 10s" && sleep 10 && node scripts/fetch_pe_and_write_sheet.mjs)
-      
-      # V-- 新增的步骤 --V
-      - name: Upload Debug Artifacts on Failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-snapshot
-          path: |
-            debug_screenshot.png
-            debug_page.html
-      # A-- 新增的步骤 --A
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci || npm i
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+      - name: Run fetch & write (with one retry)
+        run: |
+          set -e
+          node scripts/fetch_pe_and_write_sheet.mjs || (echo "retry in 10s" && sleep 10 && node scripts/fetch_pe_and
