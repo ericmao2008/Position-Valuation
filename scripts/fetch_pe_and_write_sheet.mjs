@@ -1,17 +1,19 @@
 /**
  * Version History
+ * V2.7.6
+ *  - 修复 Value Center 未能抓到 PE/ROE：改为 Playwright 解析“表格 + 表头”方式
+ *    • 等待表格加载 → 读取表头定位“PE”“ROE”列；失败则退回固定列位（PE=第3列，ROE=第8列）
+ *    • 通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定目标 <tr>
+ *    • HS300 / SP500 / CSIH30533 / HSTECH 只用 Value Center；日经维持官方档案页
+ *  - 其它保持：口径、区间判定、邮件正文（含判定）、DEBUG 日志与回滚规范
+ *
  * V2.7.5
- *  - 修复：Value Center 表格列位错误（应为 PE=第3列、ROE=第8列），导致 HS300/SPX/CSIH/HSTECH 取值为空
- *  - 其余口径与逻辑与 V2.7.4 一致：VC-only（除 Nikkei），判定基于区间，邮件正文含判定
+ *  - 纠正 VC 表格列位（原错设 PE=2/ROE=7；应为 PE=3/ROE=8）
  *
  * V2.7.4
- *  - 改为 “表格解析” 的 VC 抓取：通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定行
- *    *（当时误设 PE=第2列/ROE=第7列，此版已纠正为 PE=第3列/ROE=第8列）*
- *  - 口径：HS300/CSIH/HSTECH → CN10Y + China ERP*；SP500 → US10Y + US ERP*
- *  - Nikkei：官方档案页 PER；ROE 可覆写 ROE_JP（小数）
- *  - 判定：基于 P/E 与 [买点, 卖点]；邮件正文含判定；DEBUG 保留
+ *  - 初版表格解析（当时列位不对）
  *
- * ……（更早版本历史略，已在仓库中保留）
+ * …（更早版本历史保留在仓库注释中）
  */
 
 import fetch from "node-fetch";
@@ -25,6 +27,14 @@ const DEBUG  = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
 const TZ     = process.env.TZ || "Asia/Shanghai";
 const dbg    = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
+const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
+const VC_LINK = {
+  SH000300: "/dj-valuation-table-detail/SH000300",
+  SP500:    "/dj-valuation-table-detail/SP500",
+  CSIH30533:"/dj-valuation-table-detail/CSIH30533",
+  HSTECH:   "/dj-valuation-table-detail/HSTECH"
+};
+
 const todayStr = () => {
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
   return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
@@ -34,24 +44,24 @@ const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\
 const text2num = (s)=>{ const x=parseFloat((s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
 const pct2dec = (s)=>{ const m=(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=Number(m[1])/100; return (v>0 && v<1)? v : null; };
 
-// ---------- 参数 ----------
+// ---------- 参数口径 ----------
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-// r_f 兜底（HS300/CSIH/HSTECH 用中国10Y；SPX 用美国10Y；Nikkei 用日本10Y）
+// r_f 兜底：HS300/CSIH/HSTECH → CN10Y；SPX → US10Y；Nikkei → JP10Y
 const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
 const RF_US = numOr(process.env.RF_US,       0.0425);
 const RF_JP = numOr(process.env.RF_JP,       0.0100);
 
-// 覆写 & ROE_JP
+// 覆写 & 日经 ROE
 const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();           return s?Number(s):null; })();
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();       return s?Number(s):null; })();
 const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
-const ROE_JP = numOr(process.env.ROE_JP, null);   // 日经 ROE 覆写（小数）
+const ROE_JP = numOr(process.env.ROE_JP, null);   // 小数，如 0.10
 
-// Sheets
+// ---------- Sheets ----------
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
 const auth = new google.auth.JWT(
@@ -93,147 +103,157 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
-// ---------- Value Center 表格解析 ----------
-const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
-// code 与链接锚点
-const VC_LINK = {
-  SH000300: "/dj-valuation-table-detail/SH000300",
-  SP500:    "/dj-valuation-table-detail/SP500",
-  CSIH30533:"/dj-valuation-table-detail/CSIH30533",
-  HSTECH:   "/dj-valuation-table-detail/HSTECH"
-};
+// ---------- Value Center：Playwright 解析表格 ----------
+async function fetchVCByTablePW(){
+  const { chromium } = await import("playwright");
+  const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+  const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+  const pg  = await ctx.newPage();
+  await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
 
-function parseValueCenterTable(html){
+  // 等待表格加载稳定
+  await pg.waitForSelector("table", { timeout: 8000 }).catch(()=>{});
+  await pg.waitForLoadState('networkidle').catch(()=>{});
+  await pg.waitForTimeout(800);
+
+  const html = await pg.content();
+  await br.close();
+
+  // 解析
+  return parseVCFromHTML(html);
+}
+
+function parseVCFromHTML(html){
   const map = {};
   const rows = [...html.matchAll(/<tr[\s\S]*?<\/tr>/gi)].map(m=>m[0]);
+
+  // 尝试读取表头，确定 PE / ROE 列位
+  let headerRow = rows.find(tr => /<th/i.test(tr)) || "";
+  let headers = [];
+  if(headerRow){
+    headers = [...headerRow.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/gi)]
+      .map(m=> strip(m[1]).trim().toUpperCase());
+  }
+  // 默认列位（你确认过）：PE=第3列(索引2)，ROE=第8列(索引7)
+  let peIdx = 2, roeIdx = 7;
+  if(headers.length > 0){
+    const findIdx = (name) => headers.findIndex(h => h.replace(/\s+/g,'')===name);
+    const peH = ["PE","PE(TTM)"];
+    const roeH= ["ROE"];
+    for(const n of peH){ const i = findIdx(n); if(i>=0){ peIdx=i; break; } }
+    for(const n of roeH){ const i = findIdx(n); if(i>=0){ roeIdx=i; break; } }
+  }
+
+  // 逐指数解析
   for(const [code, href] of Object.entries(VC_LINK)){
     const row = rows.find(tr => tr.includes(href));
     if(!row) continue;
     const tds = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-      .map(m=>m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
-    // 列序确认：1 名称｜2 类型｜3 PE｜4 PE%｜5 PB｜6 PB%｜7 股息率｜8 ROE｜9 预测PEG
-    if(tds.length >= 8){
-      const pe  = text2num(tds[2]);   // 第3列
-      const roe = pct2dec(tds[7]);    // 第8列
-      if(Number.isFinite(pe) && pe>0 && pe<1000){
-        map[code] = { pe, roe: (roe>0 && roe<1)? roe : null };
-      }
+      .map(m=> m[1].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim());
+    if(tds.length === 0) continue;
+
+    // 兜底：如果表头没有 th，严格按固定列位
+    const pe  = text2num(tds[peIdx] ?? "");
+    const roe = pct2dec (tds[roeIdx] ?? "");
+
+    if(Number.isFinite(pe) && pe>0 && pe<1000){
+      map[code] = { pe, roe: (roe>0 && roe<1)? roe : null };
     }
   }
   return map;
 }
 
-async function fetchVCByTable(){
-  // HTTP 优先
-  try{
-    const r = await fetch(VC_URL, { headers:{ "User-Agent": UA }, timeout: 15000 });
-    if(r.ok){
-      const h = await r.text();
-      const m = parseValueCenterTable(h);
-      if(Object.keys(m).length){ dbg("VC table via HTTP", m); return m; }
-    }
-  }catch(e){ dbg("VC table HTTP err", e.message); }
-
-  // Playwright 兜底
-  if (USE_PW) {
-    try{
-      const { chromium } = await import("playwright");
-      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
-      const pg  = await ctx.newPage();
-      await pg.goto(VC_URL, { waitUntil: 'domcontentloaded' });
-      await pg.waitForTimeout(1800);
-      const html = await pg.content();
-      await br.close();
-      const m = parseValueCenterTable(html);
-      if(Object.keys(m).length){ dbg("VC table via PW", m); return m; }
-    }catch(e){ dbg("VC table PW err", e.message); }
-  }
-  return {};
-}
-
 let VC_CACHE = null;
 async function getVC(code){
-  if(!VC_CACHE) VC_CACHE = await fetchVCByTable();
+  if(!VC_CACHE){
+    try{
+      VC_CACHE = await fetchVCByTablePW(); // 直接用 PW 解析表格，避免 SSR/CSR 差异
+      dbg("VC parsed map", VC_CACHE);
+    }catch(e){
+      dbg("VC PW parse failed", e.message);
+      VC_CACHE = {};
+    }
+  }
   return VC_CACHE[code] || null;
 }
 
-// ---------- r_f / ERP* ----------
+// ---------- r_f / ERP* 抓取 ----------
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(!Number.isFinite(v)){
+      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/china-10-year-bond-yield","CN 10Y")' };
-  }
-}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
+  }}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
+
 async function rfUS(){ try{
   const url="https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(!Number.isFinite(v)){
+      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield","US 10Y")' };
-  }
-}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
+  }}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
+
 async function rfJP(){ try{
   const url="https://cn.investing.com/rates-bonds/japan-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
     const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    if(!Number.isFinite(v)){
+      const t=strip(h); const near=t.match(/(\d{1,2}\.\d{1,4})\s*%/);
+      if(near) v=Number(near[1])/100;
+    }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:'=HYPERLINK("https://cn.investing.com/rates-bonds/japan-10-year-bond-yield","JP 10Y")' };
+  }}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
+
+async function erpCN(){ try{
+  const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
+  const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
+  if(r.ok){
+    const h=await r.text();
+    const row=h.split(/<\/tr>/i).find(tr=> /China/i.test(tr)) || "";
+    const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
+    const v=p.find(x=>x>2 && x<10);
+    if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran China")' };
   }
-}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
+  }catch{} return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
-async function erpCN(){ // China ERP*
+async function erpUS(){ try{
   const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
-  try{
-    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
-    if(r.ok){
-      const h=await r.text();
-      const row=h.split(/<\/tr>/i).find(tr=> /China/i.test(tr)) || "";
-      const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
-      const v=p.find(x=>x>2 && x<10);
-      if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran China")' };
-    }
-  }catch{}
-  return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
-}
-async function erpUS(){ // US ERP*
-  const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
-  try{
-    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
-    if(r.ok){
-      const h=await r.text();
-      const row=h.split(/<\/tr>/i).find(tr=> /(United\s*States|USA)/i.test(tr)) || "";
-      const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
-      const v=p.find(x=>x>2 && x<10);
-      if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran US")' };
-    }
-  }catch{}
-  return { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
-}
-async function erpJP(){ // Japan ERP*
-  const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
-  try{
-    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
-    if(r.ok){
-      const h=await r.text();
-      const row=h.split(/<\/tr>/i).find(tr=> /Japan/i.test(tr)) || "";
-      const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
-      const v=p.find(x=>x>2 && x<10);
-      if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran JP")' };
-    }
-  }catch{}
-  return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
-}
+  const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
+  if(r.ok){
+    const h=await r.text();
+    const row=h.split(/<\/tr>/i).find(tr=> /(United\s*States|USA)/i.test(tr)) || "";
+    const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
+    const v=p.find(x=>x>2 && x<10);
+    if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran US")' };
+  }
+  }catch{} return { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
-// ---------- Nikkei 专用：PE ----------
+async function erpJP(){ try{
+  const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
+  const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
+  if(r.ok){
+    const h=await r.text();
+    const row=h.split(/<\/tr>/i).find(tr=> /Japan/i.test(tr)) || "";
+    const p=[...row.replace(/<[^>]+>/g," ").matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
+    const v=p.find(x=>x>2 && x<10);
+    if(v!=null) return { v: v/100, tag:"真实", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran JP")' };
+  }
+  }catch{} return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+
+// ---------- Nikkei：PER ----------
 async function peNikkei(){
   const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
   if (USE_PW) {
@@ -350,7 +370,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
           cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
           fields: "userEnteredFormat.numberFormat"
         }
-      })),
+      ])),
       { repeatCell: {
           range: { sheetId, startRowIndex: base+0, endRowIndex: base+1, startColumnIndex:0, endColumnIndex:5 },
           cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
@@ -418,11 +438,14 @@ async function sendEmailIfEnabled(lines){
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
 
-  // 拉取 Value Center 表格（除 Nikkei）
-  VC_CACHE = await fetchVCByTable();
+  // VC 表格（PW 解析）
+  let vcMap = {};
+  if (USE_PW) {
+    try { vcMap = await fetchVCByTablePW(); } catch(e){ dbg("VC PW failed", e.message); }
+  }
 
   // 1) HS300（VC；r_f=CN10Y；ERP*=China）
-  const rec_hs = await getVC("SH000300");
+  const rec_hs = vcMap["SH000300"];
   const pe_hs = rec_hs?.pe ? { v: rec_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SH000300")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   const rf_cn  = await rfCN();
   const roe_hs = rec_hs?.roe ? { v: rec_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
@@ -430,10 +453,9 @@ async function sendEmailIfEnabled(lines){
   row = r.nextRow; const j_hs = r.judgment; const pv_hs = r.pe;
 
   // 2) SP500（VC；r_f=US10Y；ERP*=US）
-  const rec_sp = await getVC("SP500");
+  const rec_sp = vcMap["SP500"];
   const pe_spx = rec_sp?.pe ? { v: rec_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC SP500")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
-  const rf_us  = await rfUS();
-  const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
+  const rf_us  = await rfUS(); const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
   const roe_spx = rec_sp?.roe ? { v: rec_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   r = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link, roe_spx);
   row = r.nextRow; const j_sp = r.judgment; const pv_sp = r.pe;
@@ -445,7 +467,7 @@ async function sendEmailIfEnabled(lines){
   row = r.nextRow; const j_nk = r.judgment; const pv_nk = r.pe;
 
   // 4) 中概互联网（VC；r_f=CN10Y；ERP*=China）
-  const rec_cx = await getVC("CSIH30533");
+  const rec_cx = vcMap["CSIH30533"];
   const pe_cx = rec_cx?.pe ? { v: rec_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC CSIH30533")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   const rf_cn2  = await rfCN(); const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
   const roe_cx = rec_cx?.roe ? { v: rec_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
@@ -453,7 +475,7 @@ async function sendEmailIfEnabled(lines){
   row = r.nextRow; const j_cx = r.judgment; const pv_cx = r.pe;
 
   // 5) 恒生科技（VC；与中概同口径：r_f=CN10Y；ERP*=China）
-  const rec_hst = await getVC("HSTECH");
+  const rec_hst = vcMap["HSTECH"];
   const pe_hst = rec_hst?.pe ? { v: rec_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC HSTECH")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN();
   const roe_hst = rec_hst?.roe ? { v: rec_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
