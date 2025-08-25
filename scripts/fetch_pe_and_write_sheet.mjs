@@ -1,20 +1,21 @@
 /**
  * Version History
+ * V2.7.3
+ *  - 修复：重复 import nodemailer 导致 “Identifier 'nodemailer' has already been declared”
+ *  - 维持 V2.7.2 口径：HS300/SP500/CSIH30533/HSTECH 仅用 Danjuan Value Center 抓 PE/ROE；
+ *    HSTECH 与中概口径一致（r_f=CN10Y，ERP*=China）；Nikkei 用官方档案页；邮件正文含判定
+ *
  * V2.7.2
- *  - 修复：缺失 peNikkei() 导致 ReferenceError
- *  - 抓取口径：HS300 / SP500 / CSIH30533 / HSTECH —— 仅用 Danjuan Value Center 聚合页获取 PE/ROE
- *              （HTTP 优先，失败再 Playwright 打开同页解析）；放弃其他网站与旧回退
- *  - HSTECH 口径：与中概互联网一致（r_f=中国10Y，ERP*=China）
- *  - 继续：判定基于 P/E 与 [买点, 卖点] 区间；邮件正文含判定；DEBUG/日志保留
+ *  - 修复 peNikkei 未定义；统一用 Value Center（除 Nikkei）抓 PE/ROE；HSTECH 与中概口径一致
  *
  * V2.7.1
  *  - 修复测试版 roeFromDanjuan 未定义；保留 Value Center 优先、邮件判定、恒生科技分块
  *
  * V2.7.0-test
- *  - 新增指数：恒生科技（HSTECH）；新增 Value Center 优先抓取；邮件正文加入判定
+ *  - 新增恒生科技（HSTECH）；Value Center 优先抓取；邮件正文加入判定
  *
  * V2.6.11
- *  - 修复：P/E 抓取函数误留为占位导致 undefined；恢复并加固四个 pe 函数
+ *  - 修复：P/E 抓取函数误留占位导致 undefined；恢复并加固四个 pe 函数
  *
  * V2.6.10
  *  - 修复：CSIH30533 的 ROE(TTM) 丢失（点击 ROE tab + JSON 优先 + 3%~40% 过滤）
@@ -51,7 +52,7 @@
  *  - 引入 ROE 因子：PE_limit = 1/(r_f+ERP*) × (ROE/ROE_BASE)
  *
  * V2.5
- *  - CSIH30533 切中国口径：r_f=中国10Y，ERP*=China
+ *  - CSIH30533 切换中国口径：r_f=中国10Y，ERP*=China
  *
  * V2.4
  *  - 新增 CSIH30533 分块；多路兜底
@@ -71,7 +72,7 @@
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
-import nodemailer from "nodemailer";
+import nodemailer from "nodemailer"; // 只保留这一处 import
 
 // ---------- 全局 ----------
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -92,7 +93,7 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.005);
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-// r_f 兜底（口径：HS300/CSIH/HSTECH 用中国10Y；SPX 用美国10Y；Nikkei 用日本10Y）
+// r_f 兜底（HS300/CSIH/HSTECH 用中国10Y；SPX 用美国10Y；Nikkei 用日本10Y）
 const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
 const RF_US = numOr(process.env.RF_US,       0.0425);
 const RF_JP = numOr(process.env.RF_JP,       0.0100);
@@ -102,7 +103,6 @@ const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE??"").trim();
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim();       return s?Number(s):null; })();
 const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim();      return s?Number(s):null; })();
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim();    return s?Number(s):null; })();
-
 const ROE_JP = numOr(process.env.ROE_JP, null);   // 日经 ROE 覆写（小数）
 
 // Sheets
@@ -242,6 +242,7 @@ async function rfJP(){ // 日本10Y
   }catch{}
   return { v:RF_JP, tag:"兜底", link:"—" };
 }
+
 async function erpCN(){ // China ERP*
   const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
   try{
@@ -285,7 +286,7 @@ async function erpJP(){ // Japan ERP*
   return { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' };
 }
 
-// ---------- 取值（仅 VC；Nikkei 例外） ----------
+// ---------- 仅用 VC 的取值（除 Nikkei） ----------
 async function peFromVC(code, linkLabel){
   const vc = await getFromVC(code);
   if(vc?.pe) return { v: vc.pe, tag:"真实", link:`=HYPERLINK("https://danjuanfunds.com/djmodule/value-center?channel=1300100141","${linkLabel}")` };
@@ -350,7 +351,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const { sheetTitle, sheetId } = await ensureToday();
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
-  const target = (label==="沪深300" || label==="中概互联网" || label==="恒生科技") ? ERP_TARGET_CN : erpStar; // HS300/CSIH/HSTECH 用 China ERP*
+  const target = (label==="沪深300" || label==="中概互联网" || label==="恒生科技") ? ERP_TARGET_CN : erpStar; // 与中概一致
   const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;
 
   const ep = Number.isFinite(pe) ? 1/pe : null;
@@ -373,7 +374,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
     ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底",
-      (label==="沪深300"||label==="中概互联网"||label==="恒生科技" ? "有知有行/Investing CN 10Y":"Investing.com 10Y"), rfRes?.link || "—"],
+      (label==="沪深300"||label==="中概互联网"||label==="恒生科技" ? "CN 10Y":"JP/US 10Y"), rfRes?.link || "—"],
     ["目标 ERP*", (label==="沪深300"||label==="中概互联网"||label==="恒生科技"? ERP_TARGET_CN : (Number.isFinite(target)?target:"")),
       (label==="沪深300"||label==="中概互联网"||label==="恒生科技"?"真实":(Number.isFinite(target)?"真实":"兜底")),
       "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
@@ -392,7 +393,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const endRow = startRow + totalRows - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${endRow}`, values);
 
-  // 样式/格式（与前版一致）
+  // 样式/格式
   const base = startRow - 1;
   const pctRowsAbs = [base+2, base+3, base+4, base+5, base+9, base+10];
   const numberRowsAbs = [base+1, base+6, base+7, base+11];
@@ -430,7 +431,6 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
 }
 
 // ---------- 邮件 ----------
-import nodemailer from "nodemailer";
 async function sendEmailIfEnabled(lines){
   const {
     SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
@@ -481,7 +481,7 @@ async function sendEmailIfEnabled(lines){
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
 
-  // 统一拉取 VC（除日经）
+  // 统一拉取 VC（除 Nikkei）
   VC_CACHE = await fetchValueCenterMap();
 
   // 1) HS300（VC）— r_f：中国10Y；ERP*：China
@@ -517,7 +517,7 @@ async function sendEmailIfEnabled(lines){
   // 5) 恒生科技（VC；与中概同口径：r_f=CN10Y，ERP*=China）
   const vc_hsTech = await getFromVC("HSTECH");
   const pe_hsTech = vc_hsTech?.pe ? { v: vc_hsTech.pe, tag:"真实", link:'=HYPERLINK("https://danjuanfunds.com/djmodule/value-center?channel=1300100141","VC HSTECH")' } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
-  const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN(); // 按你要求与中概一致
+  const rf_cn3 = await rfCN(); const { v:erp_hk_v, tag:erp_hk_tag, link:erp_hk_link } = await erpCN(); // 与中概一致
   const roe_hsTech = vc_hsTech?.roe ? { v: vc_hsTech.roe, tag:"真实", link:'=HYPERLINK("https://danjuanfunds.com/djmodule/value-center?channel=1300100141","VC")' } : { v:"", tag:"兜底", link:"—" };
   r = await writeBlock(row,"恒生科技", pe_hsTech, rf_cn3, erp_hk_v, erp_hk_tag, erp_hk_link, roe_hsTech);
   row = r.nextRow; const j_hsTech = r.judgment; const pv_hsTech = r.pe;
