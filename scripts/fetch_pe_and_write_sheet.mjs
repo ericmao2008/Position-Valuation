@@ -1,3 +1,9 @@
+// Version: V2.2
+// Change:
+// 1) 修复 Nikkei PER 抓取：优先 Playwright DOM，回退 HTML <tr>/<td> 解析；文本兜底去除
+// 2) 修复空字符串被 Number("") 变 0 的问题，避免写入 0 导致 Infinity
+// 3) 其余保持与 V2.1 一致
+
 // HS300 + S&P500 + Nikkei225 —— 三块详表；HS300 仅用 index-detail/SH000300；SPX 优先 index-detail；Nikkei 用官方档案页：Index Weight Basis
 // E/P、r_f、隐含ERP、目标ERP*、容忍带δ 显示为百分比；大量 [DEBUG]；绝不写 0。
 
@@ -65,7 +71,6 @@ async function write(range, rows){
 // ---------- r_f ----------
 async function rfCN() {
   dbg("rfCN start (Investing first)");
-  // A) Investing 中国10Y 主报价
   try {
     const url = "https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
     const r = await fetch(url, { headers: { "User-Agent": UA, "Referer": "https://www.google.com" }, timeout: 12000 });
@@ -73,14 +78,13 @@ async function rfCN() {
     if (r.ok) {
       const h = await r.text();
       let m = h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i);
-      let v = m ? Number(m[1]) / 100 : null;  // 转小数
+      let v = m ? Number(m[1]) / 100 : null;
       dbg("rfCN instrument-price-last", v);
       if (!Number.isFinite(v)) {
         const text = strip(h);
         const near = text.match(/(收益率|Yield)[^%]{0,40}?(\d{1,2}\.\d{1,4})\s*%/i) ||
                      text.match(/(\d{1,2}\.\d{1,4})\s*%/);
         if (near) v = Number(near[2] || near[1]) / 100;
-        dbg("rfCN regex pct near", v);
       }
       if (Number.isFinite(v) && v > 0 && v < 1)
         return { v, tag: "真实", link: `=HYPERLINK("${url}","CN 10Y (Investing)")` };
@@ -106,7 +110,6 @@ async function rfCN() {
     }
   } catch (e) { dbg("rfCN yzyx err", e.message); }
 
-  // C) 兜底
   dbg("rfCN fallback", RF_CN);
   return { v: RF_CN, tag: "兜底", link: "—" };
 }
@@ -163,7 +166,7 @@ async function rfJP() {
   return { v: RF_JP, tag: "兜底", link: "—" };
 }
 
-// ---------- ERP*(通用)：根据达摩达兰页面抓取指定国家；失败兜底使用传入 fallbackPct ----------
+// ---------- ERP*(通用) ----------
 async function erpFromDamodaran(countryRegex, fallbackPct){
   dbg("erp* start", countryRegex);
   const url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
@@ -185,32 +188,27 @@ async function erpFromDamodaran(countryRegex, fallbackPct){
   return { v: fallbackPct, tag: "兜底",
            link: `=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")` };
 }
-
 async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433); }
 async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 
-// ========== Danjuan：HS300 仅用 index-detail/SH000300；SPX 优先 index-detail ==========
+// ========== Danjuan：HS300 & SPX ==========
 async function peHS300(){
   const url = "https://danjuanfunds.com/index-detail/SH000300";
-
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
       const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
       const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
       const pg  = await ctx.newPage();
-
       await pg.goto(url, { waitUntil: 'domcontentloaded' });
       await pg.waitForTimeout(3000);
 
-      // A) 首选：PE + 日期（如 "PE 08-22 13.97"）
       let text = await pg.locator("body").innerText().catch(()=> "");
       dbg("HS300 index-detail body len", text?.length || 0);
       let val  = null;
       let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if (m) val = Number(m[1]);
 
-      // B) 次选：排除“分位”文案后抽取小数
       if (!Number.isFinite(val)) {
         const lines = (text || "").split(/\n+/);
         for (const line of lines) {
@@ -220,21 +218,18 @@ async function peHS300(){
           }
         }
       }
-
-      // C) DOM 穷举兜底
       if (!Number.isFinite(val)) {
         val = await pg.evaluate(() => {
           const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
           for (const el of Array.from(document.querySelectorAll("body *"))) {
             const t = (el.textContent || "").trim();
-            if (/分位/.test(t)) continue;     // 排除分位值
+            if (/分位/.test(t)) continue;
             const m = t.match(re);
             if (m) return parseFloat(m[1]);
           }
           return null;
         }).catch(()=> null);
       }
-
       await br.close();
       if (Number.isFinite(val) && val > 0 && val < 1000) {
         return { v: val, tag: "真实", link: `=HYPERLINK("${url}","Danjuan")` };
@@ -242,7 +237,6 @@ async function peHS300(){
     } catch (e) { dbg("HS300 index-detail PW error", e.message); }
   }
 
-  // HTTP 源码兜底
   try{
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:12000 });
     dbg("HS300 HTTP status", r.status);
@@ -262,13 +256,11 @@ async function peHS300(){
     }
   }catch(e){ dbg("HS300 HTTP error", e.message); }
 
-  // 兜底（绝不写 0）
   if(PE_OVERRIDE_CN!=null) return { v:PE_OVERRIDE_CN, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
 }
 
 async function peSPX(){
-  // 优先 index-detail/SP500
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -299,7 +291,6 @@ async function peSPX(){
     }catch(e){ dbg("SPX index-detail PW error", e.message); }
   }
 
-  // 退到估值页（HTTP 正则 / JSON）
   const urlVal = "https://danjuanfunds.com/dj-valuation-table-detail/SP500";
   try{
     const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:12000 });
@@ -320,60 +311,77 @@ async function peSPX(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
 }
 
-// 新增：Nikkei 225（官方档案页，取第三列 Index Weight Basis 的“最新一条”）
+// ========== Nikkei 225 ==========
 async function peNikkei(){
   const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
+
+  // A) Playwright DOM（优先，最稳）
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(1500);
+
+      // 选择数据表最后一行第 3 列（Index Weight Basis）
+      const v = await pg.evaluate(()=>{
+        const tbl = document.querySelector("table");
+        if(!tbl) return null;
+        const rows = tbl.querySelectorAll("tbody tr");
+        const row = rows[rows.length - 1];
+        if(!row) return null;
+        const tds = row.querySelectorAll("td");
+        if(tds.length < 3) return null;
+        const txt = (tds[2].textContent||"").trim().replace(/,/g,"");
+        const n = parseFloat(txt);
+        return Number.isFinite(n) ? n : null;
+      });
+      await br.close();
+      dbg("Nikkei PW value", v);
+      if(Number.isFinite(v) && v>0 && v<1000){
+        return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+      }
+    }catch(e){ dbg("Nikkei PW error", e.message); }
+  }
+
+  // B) HTML：逐 <tr> 解析
   try{
     const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:15000 });
     dbg("Nikkei page status", r.status);
     if(!r.ok) throw new Error("status not ok");
     const h = await r.text();
 
-    // ---- 方式 A：HTML 表格逐行抓取（三列：日期、Market Cap、Index Weight）----
-    // 放宽匹配，允许单元格内部存在额外标签/空白；数字允许最多3位整数+最多4位小数
-    const rowRe = /<tr[^>]*>\s*<td[^>]*>[\s\S]*?([A-Za-z]{3}\/\d{2}\/\d{4})[\s\S]*?<\/td>\s*<td[^>]*>[\s\S]*?(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>\s*<td[^>]*>[\s\S]*?(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>[\s\S]*?<\/tr>/gi;
-    const rows = [...h.matchAll(rowRe)];
-    if(rows.length){
-      const last = rows[rows.length - 1];
-      const dateStr = last[1];
-      const mc = Number(last[2]);
-      const iw = Number(last[3]);   // 第三列 Index Weight Basis
-      dbg("Nikkei html rows", rows.length, "last date", dateStr, "mc", mc, "iw", iw);
-      if(Number.isFinite(iw) && iw > 0 && iw < 1000){
-        return { v: iw, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+    // 按行拆分 <tr>，每行再抽 3 个 <td>；第三个即 Index Weight Basis
+    const trs = [...h.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(m=>m[1]);
+    let lastVal = null, lastDate = null;
+    for(const tr of trs){
+      const tds = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m=>m[1].replace(/<[^>]*>/g,"").trim());
+      if(tds.length>=3 && /[A-Za-z]{3}\/\d{2}\/\d{4}/.test(tds[0])){
+        lastDate = tds[0];
+        const n = parseFloat(tds[2].replace(/,/g,""));
+        if(Number.isFinite(n)) lastVal = n;   // 记录到最后一条
       }
     }
-
-    // ---- 方式 B：文本兜底 ----
-    // 1) 拿到含日期的最后一行
-    const text = strip(h);
-    const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-    const dateRe = /[A-Za-z]{3}\/\d{2}\/\d{4}/;
-    let lastLine = null;
-    for(const line of lines){ if(dateRe.test(line)) lastLine = line; }
-    if(lastLine){
-      // 2) 去掉日期文本，避免 22/2025 干扰
-      const noDate = lastLine.replace(dateRe, " ").trim();
-      // 3) 只抓带小数点的数（列值），忽略纯整数
-      const decs = [...noDate.matchAll(/(\d{1,3}\.\d{1,4})/g)].map(m=>Number(m[1])).filter(Number.isFinite);
-      const v = decs.length ? decs[decs.length-1] : null; // 取最后一个 => 第三列
-      dbg("Nikkei text fallback decs", decs, "picked", v, "line", lastLine);
-      if(Number.isFinite(v) && v > 0 && v < 1000){
-        return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
-      }
+    dbg("Nikkei HTML last", { lastDate, lastVal });
+    if(Number.isFinite(lastVal) && lastVal>0 && lastVal<1000){
+      return { v:lastVal, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
     }
   }catch(e){ dbg("Nikkei fetch error", e.message); }
 
+  // C) 最终兜底
   if(PE_OVERRIDE_NIKKEI!=null) return { v: PE_OVERRIDE_NIKKEI, tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
 }
 
-// ---------- 写单块（把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ = 百分比） ----------
+// ---------- 写单块 ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle, sheetId } = await ensureToday();
 
-  const pe = Number(peRes.v);                 // 抓不到就是 ""，不会是 0
-  const rf = Number.isFinite(rfRes.v) ? rfRes.v : null;
+  // 关键修复：禁止把 "" 变成 0
+  const pe = (peRes==null || peRes.v==="" || peRes.v==null) ? null : Number(peRes.v);
+  const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
 
   const ep = Number.isFinite(pe) ? 1/pe : null;
@@ -391,10 +399,10 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
 
   const rows = [
     ["字段","数值","数据","说明","数据源"],
-    ["指数", label, "真实", "宽基指数估值分块", peRes.link || "—"],
-    ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes.link || "—"],
+    ["指数", label, "真实", "宽基指数估值分块", peRes?.link || "—"],
+    ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
-    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label==="沪深300"?"有知有行 10Y":"Investing.com 10Y"), rfRes.link || "—"],
+    ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", (label==="沪深300"?"有知有行 10Y":"Investing.com 10Y"), rfRes?.link || "—"],
     ["隐含ERP = E/P − r_f", implied ?? "", (implied!=null)?"真实":"兜底", "市场给予的风险补偿（小数，显示为百分比）","—"],
     ["目标 ERP*", (label==="沪深300"? ERP_TARGET_CN : (Number.isFinite(target)?target:"")), (label==="沪深300"?"真实":(Number.isFinite(target)?"真实":"兜底")),
       (label==="沪深300"?"建议参考达摩达兰":"达摩达兰"), erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
@@ -407,7 +415,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // 把 E/P、r_f、隐含ERP、目标ERP*、容忍带δ (块内第4~8行，B列) 统一设为 0.00%
+  // 百分比格式化
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
@@ -415,9 +423,9 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
         repeatCell: {
           range: {
             sheetId,
-            startRowIndex: (startRow - 1) + 3,  // 第4行(E/P)
-            endRowIndex:   (startRow - 1) + 8,  // 第8行(δ) 之后不含
-            startColumnIndex: 1,                // B 列
+            startRowIndex: (startRow - 1) + 3,
+            endRowIndex:   (startRow - 1) + 8,
+            startColumnIndex: 1,
             endColumnIndex:   2
           },
           cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
@@ -450,8 +458,8 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   // Nikkei 225（日经指数：日本10Y + ERP(Japan)）
   const pe_nk = await peNikkei();
   const rf_jp = await rfJP();
-  const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();   // 目前口径 5.27%（兜底）
+  const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
   row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link);
 
-  console.log("[DONE]", todayStr(), { hs300_pe: pe_hs.v, spx_pe: pe_spx.v, nikkei_pe: pe_nk.v });
+  console.log("[DONE]", todayStr(), { hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v });
 })();
