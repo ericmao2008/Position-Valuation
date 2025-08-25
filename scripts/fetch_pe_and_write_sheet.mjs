@@ -1,7 +1,9 @@
-// Version: V2.5
-// Change:
-// 1) 中概互联网（CSIH30533）无风险利率改为中国10Y (rfCN)，目标ERP改为达摩达兰 China (erpCN)
-// 2) 其余部分与 V2.4 保持一致（Nikkei DOM&HTML 抓取、δ→P/E 三条阈值、空值不写0、防 Infinity）
+// Version: V2.6
+// Change (Plan B):
+// 1) 在每个指数分块新增 “合理PE（ROE因子） = 对应P/E上限 × (ROE / ROE_BASE)”
+// 2) 自动抓取 ROE（TTM）：HS300 / SP500 / CSIH30533（中概互联网）；Nikkei 暂无 ROE 则留空
+// 3) ROE_BASE 环境变量可覆盖，默认 0.12（12%）
+// 4) 其他保持 V2.5：δ→P/E 三阈值、空值不写0、防 Infinity、Nikkei DOM&HTML 抓取
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
@@ -23,6 +25,7 @@ const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\
 // ---------- 判定参数 ----------
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);   // HS300（可覆盖）
 const DELTA         = numOr(process.env.DELTA,      0.005);
+const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);     // 12%
 
 // ---------- 兜底（小数） ----------
 const RF_CN = numOr(process.env.RF_OVERRIDE, 0.0178);
@@ -168,7 +171,7 @@ async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433);
 async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 async function erpCN(){  return erpFromDamodaran("^\\s*China\\s*$|China", 0.0527); }
 
-// ========== Danjuan：HS300 & SPX ==========
+// ========== Danjuan：PE & ROE 抓取 ==========
 async function peHS300(){
   const url = "https://danjuanfunds.com/index-detail/SH000300";
   if (USE_PW) {
@@ -237,6 +240,46 @@ async function peHS300(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan")` };
 }
 
+// 从 Danjuan 页面解析 ROE（%），返回小数（如 0.1636）
+async function roeFromDanjuan(urls){
+  for(const url of urls){
+    try{
+      const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout:15000 });
+      dbg("ROE fetch", url, r.status);
+      if(!r.ok) continue;
+      const h = await r.text();
+      const text = strip(h);
+      // 1) "ROE 16.36%" 这类
+      let m = text.match(/ROE[^%\d]{0,20}(\d{1,2}(?:\.\d{1,2})?)\s*%/i);
+      if(m){
+        const v = Number(m[1])/100;
+        if(Number.isFinite(v) && v>0 && v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` };
+      }
+      // 2) JSON 字段：roe 或 roe_ttm
+      m = h.match(/"roe(?:_ttm)?"\s*:\s*"?(\d{1,2}(?:\.\d{1,2})?)"?/i);
+      if(m){
+        const v = Number(m[1])/100;
+        if(Number.isFinite(v) && v>0 && v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` };
+      }
+    }catch(e){ dbg("ROE err", e.message); }
+  }
+  return { v:"", tag:"兜底", link:"—" };
+}
+
+async function roeHS300(){ 
+  return roeFromDanjuan(["https://danjuanfunds.com/index-detail/SH000300"]);
+}
+async function roeSPX(){ 
+  return roeFromDanjuan([
+    "https://danjuanfunds.com/index-detail/SP500",
+    "https://danjuanfunds.com/dj-valuation-table-detail/SP500"
+  ]);
+}
+async function roeCXIN(){ 
+  return roeFromDanjuan(["https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533"]);
+}
+
+// ========== SPX ==========
 async function peSPX(){
   if (USE_PW) {
     try{
@@ -252,7 +295,7 @@ async function peSPX(){
       dbg("SPX index-detail body len", text?.length || 0);
       let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if(m){ const v=Number(m[1]); await br.close();
-        if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` }; }
+        if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("https://danjuanfunds.com/index-detail/SP500","Danjuan SP500")` }; }
       const v2 = await pg.evaluate(()=>{
         const re=/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
         for(const el of Array.from(document.querySelectorAll("body *"))){
@@ -264,7 +307,7 @@ async function peSPX(){
         return null;
       }).catch(()=> null);
       await br.close();
-      if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan SP500")` };
+      if(Number.isFinite(v2)&&v2>0&&v2<1000) return { v:v2, tag:"真实", link:`=HYPERLINK("https://danjuanfunds.com/index-detail/SP500","Danjuan SP500")` };
     }catch(e){ dbg("SPX index-detail PW error", e.message); }
   }
 
@@ -346,10 +389,8 @@ async function peNikkei(){
 
 // ========== China Internet (CSIH30533) ==========
 async function peChinaInternet(){
-  // 估值页（非 index-detail），页面中通常出现“PE 08-22 18.76”以及隐藏 JSON 字段 "pe_ttm"
   const url = "https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533";
 
-  // A) Playwright DOM：优先尝试，在 body 文本与 DOM 邻近搜索，排除“分位/百分位”
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -359,15 +400,12 @@ async function peChinaInternet(){
       await pg.goto(url, { waitUntil: 'domcontentloaded' });
       await pg.waitForTimeout(1800);
 
-      // 1) 直接匹配 "PE 08-22 18.76"
       let bodyText = await pg.locator("body").innerText().catch(()=> "");
       let m = bodyText && bodyText.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if (m) {
         const v = Number(m[1]); await br.close();
         if(Number.isFinite(v) && v>0 && v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
       }
-
-      // 2) DOM 邻近搜索：含“PE”的节点附近的浮点数，排除“分位/百分位”
       const v2 = await pg.evaluate(()=>{
         const isBad = (t)=> /分位|百分位|%/.test(t);
         const reNum = /(\d{1,3}\.\d{1,2})/;
@@ -386,7 +424,6 @@ async function peChinaInternet(){
     }catch(e){ dbg("CSIH30533 PW error", e.message); }
   }
 
-  // B) HTTP 源码：多路兜底
   try{
     const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
     dbg("CSIH30533 HTTP status", r.status);
@@ -394,21 +431,16 @@ async function peChinaInternet(){
       const h=await r.text();
       const text=strip(h);
 
-      // 1) "PE xx-xx xx.xx"
       let m = text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
       if(m){
         const v=Number(m[1]);
         if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
       }
-
-      // 2) JSON: "pe_ttm": "18.76" 或数值
       let mJson = h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
       if(mJson){
         const v=Number(mJson[1]);
         if(Number.isFinite(v)&&v>0&&v<1000) return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
       }
-
-      // 3) 文本邻近兜底：找到含“PE”的行且不含“分位/百分位”，抓其内/后续的第一个小数
       const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
       for(const line of lines){
         if(/PE\b/i.test(line) && !/分位|百分位/.test(line)){
@@ -426,13 +458,14 @@ async function peChinaInternet(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
 }
 
-// ---------- 写单块（包含 δ→P/E 的三条阈值） ----------
-async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
+// ---------- 写单块（含 δ→P/E 三阈值 + ROE 因子修正） ----------
+async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
 
   const pe = (peRes==null || peRes.v==="" || peRes.v==null) ? null : Number(peRes.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
+  const roe = Number.isFinite(roeRes?.v) ? roeRes.v : null;    // 小数
 
   const ep = Number.isFinite(pe) ? 1/pe : null;
   const implied = (ep!=null && Number.isFinite(rf)) ? (ep - rf) : null;
@@ -440,11 +473,14 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
 
   const denomBuy  = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target + DELTA) : null;
   const denomSell = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target - DELTA) : null;
-
   const peBuyUpper  = (denomBuy  != null && denomBuy  > 0) ? Number((1/denomBuy ).toFixed(2)) : null;
   const peSellLower = (denomSell != null && denomSell > 0) ? Number((1/denomSell).toFixed(2)) : null;
 
-  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit, peBuyUpper, peSellLower });
+  const peLimitRoe = (peLimit!=null && roe!=null && ROE_BASE>0)
+    ? Number((peLimit * (roe/ROE_BASE)).toFixed(2))
+    : null;
+
+  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit, peBuyUpper, peSellLower, roe, ROE_BASE, peLimitRoe });
 
   let status="需手动更新";
   if (implied!=null && Number.isFinite(target)) {
@@ -472,31 +508,33 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     ["买点PE上限 = 1/(r_f + ERP* + δ)", peBuyUpper ?? "", (peBuyUpper!=null)?"真实":"兜底", "低估买点阈值","—"],
     ["卖点PE下限 = 1/(r_f + ERP* − δ)", peSellLower ?? "", (peSellLower!=null)?"真实":"兜底", "高估卖点阈值（需分母>0）","—"],
     ["合理PE区间（买点上限 ~ 卖点下限）", fairRange, (peBuyUpper!=null && peSellLower!=null)?"真实":"兜底", "合理持有的直观区间","—"],
+    ["ROE（TTM）", roe ?? "", (roe!=null)?"真实":"兜底", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
+    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],
+    ["合理PE（ROE因子） = 上一行 × (ROE/基准)", peLimitRoe ?? "", (peLimitRoe!=null)?"真实":"兜底", "方案B修正后的合理PE","—"],
     ["判定", status, (implied!=null && Number.isFinite(target))?"真实":"兜底", "买点/持有/卖点/需手动","—"],
   ];
 
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // 百分比格式化（E/P、r_f、隐含ERP、ERP*、δ）
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: {
-      requests: [{
-        repeatCell: {
-          range: {
-            sheetId,
-            startRowIndex: (startRow - 1) + 3,
-            endRowIndex:   (startRow - 1) + 8,
-            startColumnIndex: 1,
-            endColumnIndex:   2
-          },
-          cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
-          fields: "userEnteredFormat.numberFormat"
-        }
-      }]
+  // 百分比格式化：E/P、r_f、隐含ERP、ERP*、δ、ROE、ROE基准
+  const requests = [
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex:(startRow-1)+3, endRowIndex:(startRow-1)+8, startColumnIndex:1, endColumnIndex:2 },
+        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+        fields: "userEnteredFormat.numberFormat"
+      }
+    },
+    {
+      repeatCell: { // ROE 行
+        range: { sheetId, startRowIndex:(startRow-1)+12, endRowIndex:(startRow-1)+14, startColumnIndex:1, endColumnIndex:2 },
+        cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+        fields: "userEnteredFormat.numberFormat"
+      }
     }
-  });
+  ];
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
   return end + 2;
 }
@@ -510,25 +548,28 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   // 1) 沪深300（中国10Y + ERP_TARGET_CN）
   const pe_hs = await peHS300();
   const rf_cn = await rfCN();
-  row = await writeBlock(row,"沪深300", pe_hs, rf_cn, null, null, null);
+  const roe_hs = await roeHS300();
+  row = await writeBlock(row,"沪深300", pe_hs, rf_cn, null, null, null, roe_hs);
 
   // 2) 标普500（美国10Y + ERP(US)）
   const rf_us  = await rfUS();
   const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
   const pe_spx = await peSPX();
-  row = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link);
+  const roe_spx = await roeSPX();
+  row = await writeBlock(row,"标普500", pe_spx, rf_us, erp_us_v, erp_us_tag, erp_us_link, roe_spx);
 
-  // 3) 日经225（日本10Y + ERP(Japan)）
+  // 3) 日经225（日本10Y + ERP(Japan)）——暂未获取 ROE
   const pe_nk = await peNikkei();
   const rf_jp = await rfJP();
   const { v:erp_jp_v, tag:erp_jp_tag, link:erp_jp_link } = await erpJP();
-  row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link);
+  row = await writeBlock(row,"日经指数", pe_nk, rf_jp, erp_jp_v, erp_jp_tag, erp_jp_link, null);
 
   // 4) 中概互联网（CSIH30533：中国10Y + ERP(China)）
   const pe_cxin = await peChinaInternet();
-  const rf_cn2  = await rfCN();  // 改为中国10Y
-  const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();  // 改为 China
-  row = await writeBlock(row,"中概互联网", pe_cxin, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link);
+  const rf_cn2  = await rfCN();
+  const { v:erp_cn_v, tag:erp_cn_tag, link:erp_cn_link } = await erpCN();
+  const roe_cxin = await roeCXIN();
+  row = await writeBlock(row,"中概互联网", pe_cxin, rf_cn2, erp_cn_v, erp_cn_tag, erp_cn_link, roe_cxin);
 
   console.log("[DONE]", todayStr(), {
     hs300_pe: pe_hs?.v, spx_pe: pe_spx?.v, nikkei_pe: pe_nk?.v, cxin_pe: pe_cxin?.v
