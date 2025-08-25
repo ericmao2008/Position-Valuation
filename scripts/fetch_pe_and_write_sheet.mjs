@@ -1,22 +1,27 @@
 /**
  * Version History
+ * V2.6.11
+ *  - 修复：上一版中 P/E 抓取函数被误留为占位导致全部 undefined
+ *  - 恢复并加固：peHS300 / peSPX / peNikkei / peChinaInternet
+ *      * Playwright DOM 优先；HTTP 源码 + JSON("pe_ttm") + 邻近文本多路兜底；绝不写 0
+ *  - 其余保持 V2.6.10：中概 ROE(tab 点击) 修复、判定=基于区间、邮件 DEBUG、清空样式等
+ *
  * V2.6.10
- *  - 修复 CSIH30533 的 ROE(TTM) 偶发丢失：Playwright 显式点击“ROE”tab 再读取；HTTP 兜底优先 JSON(roe_ttm/roe)，
- *    否则在“ROE”右侧邻近文本内取百分数，并做 3%~40% 合理性过滤
- *  - 邮件：支持 MAIL_FROM_EMAIL/MAIL_FROM_NAME；同时发送 text+html；保留 verify 与详细 DEBUG
- *  - 其余保持 V2.6.9：判定改为基于 P/E 与 [买点, 卖点] 区间
+ *  - 中概 ROE(TTM) 修复：Playwright 显式点击 ROE tab；HTTP 兜底先 JSON(roe_ttm/roe)，再“ROE”右侧邻近百分数(3%~40%)
+ *  - 邮件：支持 MAIL_FROM_EMAIL/MAIL_FROM_NAME；text+html；verify 与详细 DEBUG
+ *  - 判定：基于 P/E 与 [买点, 卖点]
  *
  * V2.6.9
  *  - 判定：用 P/E 与 [买点, 卖点] 区间；邮件内建 DEBUG（verify / send 日志 / FORCE_EMAIL）
  *
  * V2.6.8
- *  - 修复：中概 ROE 偶发抓成 30%（更严格的匹配与范围过滤）
+ *  - 修复：中概 ROE 偶发抓成 30%（更严格匹配与范围过滤）
  *
  * V2.6.7
  *  - 去除“中枢（对应P/E上限）”；仅保留买点/卖点/合理区间；公式写入说明行
  *
  * V2.6.6
- *  - “指数”行为首行并高亮；去除表头行；ROE 按百分比、因子小数；版本日志保留
+ *  - “指数”行为首行并高亮；去除表头行；ROE 百分比、因子小数；版本日志保留
  *
  * V2.6.5
  *  - 清空当日 Sheet（值+样式+边框）；统一 totalRows 用于写入/格式化/外框；每块后留 1 空行
@@ -25,7 +30,7 @@
  *  - 修复写入范围与实际行数不一致
  *
  * V2.6.3
- *  - 方案B：加入“合理PE（ROE因子）”；在说明中写明公式；（当时判定基于因子阈值）
+ *  - 方案B：加入“合理PE（ROE因子）”；在说明中写明公式
  *
  * V2.6.2
  *  - 去除多余 P/E 行；每块加粗浅灰与外框；曾并行显示“原始阈值/ROE因子阈值”
@@ -75,7 +80,7 @@ const strip = (h)=>h.replace(/<script[\s\S]*?<\/script>/gi,"").replace(/<style[\
 
 // ---------- 判定参数 ----------
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
-const DELTA         = numOr(process.env.DELTA,      0.005);   // 仅展示说明；卖点判定不依赖 δ
+const DELTA         = numOr(process.env.DELTA,      0.005);   // 仅展示说明；判定看区间
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
 // ---------- 兜底 ----------
@@ -173,19 +178,275 @@ async function erpFromDamodaran(countryRegex, fallbackPct){
     const cand=pcts.find(x=> x>2 && x<10);
     if(cand!=null) return { v:cand/100, tag:"真实", link:`=HYPERLINK("${url}", "Damodaran(${countryRegex})")` };
   }catch{}
-  return { v: fallbackPct, tag: "兜底", link: `=HYPERLINK("${url}","Damodaran")` };
+  return { v: fallbackPct, tag: "兜底",
+           link: `=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")` };
 }
 async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433); }
 async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 async function erpCN(){  return erpFromDamodaran("^\\s*China\\s*$|China", 0.0527); }
 
-// ---------- P/E 抓取（稳健），略去注释 ----------
-async function peHS300(){ /* 同 V2.6.9 */  /* ... */ }
-async function peSPX(){   /* 同 V2.6.9 */  /* ... */ }
-async function peNikkei(){/* 同 V2.6.9 */  /* ... */ }
-async function peChinaInternet(){ /* 同 V2.6.9 */ /* ... */ }
+// ========== P/E 抓取（恢复并加固） ==========
 
-// ---------- ROE(TTM) 抓取（通用） ----------
+// HS300：index-detail/SH000300 （优先 Playwright，退 HTTP 源码 + JSON "pe_ttm"）
+async function peHS300(){
+  const url = "https://danjuanfunds.com/index-detail/SH000300";
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(2000);
+
+      let text = await pg.locator("body").innerText().catch(()=> "");
+      dbg("HS300 index body len", text?.length || 0);
+
+      let val = null;
+      let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if (m) val = Number(m[1]);
+
+      if (!Number.isFinite(val)) {
+        val = await pg.evaluate(() => {
+          const re = /PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
+          for (const el of Array.from(document.querySelectorAll("body *"))) {
+            const t = (el.textContent || "").trim();
+            if (/分位/.test(t)) continue;
+            const m = t.match(re);
+            if (m) return parseFloat(m[1]);
+          }
+          return null;
+        }).catch(()=> null);
+      }
+
+      await br.close();
+      if (Number.isFinite(val) && val > 0 && val < 1000)
+        return { v: val, tag: "真实", link: `=HYPERLINK("${url}","Danjuan HS300")` };
+    } catch (e) { dbg("peHS300 PW error", e.message); }
+  }
+
+  // HTTP 源码兜底
+  try{
+    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:12000 });
+    dbg("HS300 HTTP status", r.status);
+    if(r.ok){
+      const h=await r.text();
+      const text=strip(h);
+      let m=text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(!m) m=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(m){
+        const v=Number(m[1]);
+        if(Number.isFinite(v)&&v>0&&v<1000)
+          return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan HS300")` };
+      }
+    }
+  }catch(e){ dbg("peHS300 HTTP error", e.message); }
+
+  if(PE_OVERRIDE_CN!=null) return { v:PE_OVERRIDE_CN, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan HS300")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan HS300")` };
+}
+
+// SPX：优先 index-detail/SP500（PW），退到 dj-valuation-table-detail/SP500 （HTTP/JSON）
+async function peSPX(){
+  const urlIdx = "https://danjuanfunds.com/index-detail/SP500";
+  const urlVal = "https://danjuanfunds.com/dj-valuation-table-detail/SP500";
+
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(urlIdx, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(2000);
+
+      let text = await pg.locator("body").innerText().catch(()=> "");
+      dbg("SPX index body len", text?.length || 0);
+
+      let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(m){
+        const v=Number(m[1]); await br.close();
+        if(Number.isFinite(v)&&v>0&&v<1000)
+          return { v, tag:"真实", link:`=HYPERLINK("${urlIdx}","Danjuan SP500")` };
+      }
+
+      const v2 = await pg.evaluate(()=>{
+        const re=/PE[\s\S]{0,80}?(\d{1,3}\.\d{1,2})/i;
+        for(const el of Array.from(document.querySelectorAll("body *"))){
+          const t=(el.textContent||"").trim();
+          if(/分位/.test(t)) continue;
+          const m=t.match(re);
+          if(m) return parseFloat(m[1]);
+        }
+        return null;
+      }).catch(()=> null);
+
+      await br.close();
+      if(Number.isFinite(v2)&&v2>0&&v2<1000)
+        return { v:v2, tag:"真实", link:`=HYPERLINK("${urlIdx}","Danjuan SP500")` };
+    }catch(e){ dbg("peSPX PW error", e.message); }
+  }
+
+  // HTTP 估值页兜底
+  try{
+    const r=await fetch(urlVal,{ headers:{ "User-Agent":UA }, timeout:12000 });
+    dbg("SPX valuation HTTP status", r.status);
+    if(r.ok){
+      const h=await r.text();
+      const text=strip(h);
+      let m=text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(!m) m=h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(m){
+        const v=Number(m[1]);
+        if(Number.isFinite(v)&&v>0&&v<1000)
+          return { v, tag:"真实", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
+      }
+    }
+  }catch(e){ dbg("peSPX HTTP error", e.message); }
+
+  if(PE_OVERRIDE_SPX!=null) return { v:PE_OVERRIDE_SPX, tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${urlVal}","Danjuan SP500")` };
+}
+
+// Nikkei：官方档案页，取第三列 Index Weight Basis 的最新一行
+async function peNikkei(){
+  const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
+
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(1500);
+
+      const v = await pg.evaluate(()=>{
+        const tbl = document.querySelector("table");
+        if(!tbl) return null;
+        const rows = tbl.querySelectorAll("tbody tr");
+        const row = rows[rows.length - 1];
+        if(!row) return null;
+        const tds = row.querySelectorAll("td");
+        if(tds.length < 3) return null;
+        const txt = (tds[2].textContent||"").trim().replace(/,/g,"");
+        const n = parseFloat(txt);
+        return Number.isFinite(n) ? n : null;
+      });
+
+      await br.close();
+      if(Number.isFinite(v) && v>0 && v<1000)
+        return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+    }catch(e){ dbg("peNikkei PW error", e.message); }
+  }
+
+  // HTTP 兜底
+  try{
+    const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:15000 });
+    dbg("Nikkei page status", r.status);
+    if(r.ok){
+      const h=await r.text();
+      const trs=[...h.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(m=>m[1]);
+      let lastVal = null, lastDate = null;
+      for(const tr of trs){
+        const tds=[...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m=>m[1].replace(/<[^>]*>/g,"").trim());
+        if(tds.length>=3 && /[A-Za-z]{3}\/\d{2}\/\d{4}/.test(tds[0])){
+          lastDate = tds[0];
+          const n = parseFloat(tds[2].replace(/,/g,""));
+          if(Number.isFinite(n)) lastVal = n;
+        }
+      }
+      dbg("Nikkei HTML last", { lastDate, lastVal });
+      if(Number.isFinite(lastVal) && lastVal>0 && lastVal<1000)
+        return { v:lastVal, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+    }
+  }catch(e){ dbg("peNikkei HTTP error", e.message); }
+
+  if(PE_OVERRIDE_NIKKEI!=null) return { v:PE_OVERRIDE_NIKKEI, tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+}
+
+// 中概互联网：dj-valuation-table-detail/CSIH30533 （PW/HTTP/JSON/邻近文本）
+async function peChinaInternet(){
+  const url = "https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533";
+
+  if (USE_PW) {
+    try{
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({ userAgent: UA, locale: 'zh-CN', timezoneId: TZ });
+      const pg  = await ctx.newPage();
+      await pg.goto(url, { waitUntil: 'domcontentloaded' });
+      await pg.waitForTimeout(1800);
+
+      let text = await pg.locator("body").innerText().catch(()=> "");
+      dbg("CSIH30533 body len", text?.length || 0);
+
+      // 1) "PE 08-22 18.76"
+      let m = text && text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if (m) {
+        const v = Number(m[1]); await br.close();
+        if(Number.isFinite(v) && v>0 && v<1000)
+          return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+      }
+
+      // 2) DOM 邻近：含“PE”的节点附近数字，排除“分位/百分位”
+      const v2 = await pg.evaluate(()=>{
+        const isBad = (t)=> /分位|百分位|%/.test(t);
+        const reNum = /(\d{1,3}\.\d{1,2})/;
+        let best = null;
+        for(const el of Array.from(document.querySelectorAll("body *"))){
+          const t = (el.textContent||"").trim();
+          if(!/PE\b/i.test(t)) continue;
+          if(isBad(t)) continue;
+          const m = t.match(reNum);
+          if(m){ const x = parseFloat(m[1]); if(Number.isFinite(x)) best = x; }
+        }
+        return best;
+      }).catch(()=> null);
+
+      await br.close();
+      if(Number.isFinite(v2) && v2>0 && v2<1000)
+        return { v:v2, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+    }catch(e){ dbg("peCXIN PW error", e.message); }
+  }
+
+  // HTTP 兜底：优先 JSON "pe_ttm"
+  try{
+    const r=await fetch(url,{ headers:{ "User-Agent":UA }, timeout:15000 });
+    dbg("CSIH30533 HTTP status", r.status);
+    if(r.ok){
+      const h=await r.text();
+      const text=strip(h);
+
+      let m = h.match(/"pe_ttm"\s*:\s*"?([\d.]+)"?/i);
+      if(!m) m = text.match(/PE\s*\d{2}-\d{2}\s*(\d{1,3}\.\d{1,2})/);
+      if(m){
+        const v=Number(m[1]);
+        if(Number.isFinite(v)&&v>0&&v<1000)
+          return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+      }
+
+      // 邻近兜底：含“PE”的行且不含“分位/百分位”，抓第一个小数
+      const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+      for(const line of lines){
+        if(/PE\b/i.test(line) && !/分位|百分位/.test(line)){
+          const mm = line.match(/(\d{1,3}\.\d{1,2})/);
+          if(mm){
+            const v=Number(mm[1]);
+            if(Number.isFinite(v)&&v>0&&v<1000)
+              return { v, tag:"真实", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+          }
+        }
+      }
+    }
+  }catch(e){ dbg("peCXIN HTTP error", e.message); }
+
+  if(PE_OVERRIDE_CXIN!=null) return { v:PE_OVERRIDE_CXIN, tag:"兜底", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Danjuan CSIH30533")` };
+}
+
+// ---------- ROE(TTM) 抓取（通用 + CXIN 专用） ----------
 async function roeFromDanjuan(urls){
   if (USE_PW) {
     try{
@@ -199,7 +460,6 @@ async function roeFromDanjuan(urls){
         const body = await pg.locator("body").innerText().catch(()=> "");
         let m = body && body.match(/ROE[^%\d]{0,40}(\d{1,2}(?:\.\d{1,2})?)\s*%/i);
         if(m){ const v=Number(m[1])/100; await br.close(); return { v, tag:"真实", link:`=HYPERLINK("${url}","ROE")` }; }
-        // DOM 遍历
         const v2 = await pg.evaluate(()=>{
           const re=/(\d{1,2}(?:\.\d{1,2})?)\s*%/;
           for(const el of Array.from(document.querySelectorAll("body *"))){
@@ -215,7 +475,6 @@ async function roeFromDanjuan(urls){
       await br.close();
     }catch(e){ dbg("ROE PW err", e.message); }
   }
-  // HTTP 兜底
   for(const url of urls){
     try{
       const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout:15000 });
@@ -234,10 +493,8 @@ async function roeFromDanjuan(urls){
   return { v:"", tag:"兜底", link:"—" };
 }
 
-// ---------- 专用：中概互联网 ROE（显式点击 ROE tab） ----------
 async function roeCXIN(){
   const url = "https://danjuanfunds.com/dj-valuation-table-detail/CSIH30533";
-
   if (USE_PW) {
     try{
       const { chromium } = await import("playwright");
@@ -246,42 +503,26 @@ async function roeCXIN(){
       const pg  = await ctx.newPage();
       await pg.goto(url, { waitUntil: 'domcontentloaded' });
 
-      // 1) 尝试点击“ROE”tab（兼容多种写法）
-      const tabSelectorCandidates = [
-        'text=/^\\s*ROE\\s*走?势?\\s*$/i',
-        'text=/^\\s*ROE\\s*$/i',
-        'text=/ROE/'
-      ];
-      for (const sel of tabSelectorCandidates) {
-        try { await pg.locator(sel).first().click({ timeout: 1000 }); break; } catch {}
-      }
+      // 点击“ROE”tab
+      const tabSel = ['text=/^\\s*ROE\\s*走?势?\\s*$/i','text=/^\\s*ROE\\s*$/i','text=/ROE/'];
+      for (const sel of tabSel) { try { await pg.locator(sel).first().click({ timeout: 900 }); break; } catch {} }
       await pg.waitForTimeout(1000);
 
-      // 2) 在可见区域查找“ROE … %”
       const val = await pg.evaluate(()=>{
-        // 先在含 “ROE” 的块内找最近百分数
-        const blocks = Array.from(document.querySelectorAll("body *"))
-          .filter(el => /ROE\b/i.test((el.textContent||"")));
+        const blocks = Array.from(document.querySelectorAll("body *")).filter(el=>/ROE\b/i.test((el.textContent||"")));
         for(const el of blocks){
           const txt=(el.textContent||"").replace(/\s+/g," ");
           const m=txt.match(/ROE[^%\d]{0,40}(\d{1,2}(?:\.\d{1,2})?)\s*%/i);
           if(m){ const x=parseFloat(m[1]); if(isFinite(x)) return x; }
         }
-        // 退而求其次：页面第一个合理范围的百分数
-        const m2=(document.body.textContent||"").match(/(\d{1,2}(?:\.\d{1,2})?)\s*%/);
-        if(m2){ const x=parseFloat(m2[1]); if(isFinite(x)) return x; }
         return null;
       });
-
       await br.close();
       if(Number.isFinite(val) && val>3 && val<40) return { v: val/100, tag:"真实", link:`=HYPERLINK("${url}","ROE")` };
-      dbg("roeCXIN PW got invalid or empty:", val);
-    }catch(e){
-      dbg("roeCXIN PW error", e.message);
-    }
+    }catch(e){ dbg("roeCXIN PW err", e.message); }
   }
 
-  // HTTP 兜底：先 JSON 再“ROE右侧就近”
+  // HTTP 兜底
   try{
     const r=await fetch(url,{ headers:{ "User-Agent": UA }, timeout:15000 });
     if(r.ok){
@@ -297,11 +538,10 @@ async function roeCXIN(){
     }
   }catch(e){ dbg("roeCXIN HTTP err", e.message); }
 
-  // 最后兜底：返回空值但标记兜底（不写 0）
   return { v:"", tag:"兜底", link:"—" };
 }
 
-// ---------- 写单块（判定 = 基于 P/E 与区间） ----------
+// ---------- 写单块（判定 = 基于 P/E 区间） ----------
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink, roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
 
@@ -316,7 +556,7 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const factor = (roe!=null && roe>0) ? (roe/ROE_BASE) : 1;
   const factorDisp = (roe!=null && roe>0) ? Number(factor.toFixed(2)) : "";
 
-  // 仅保留“因子后”的买/卖/区间
+  // 区间（因子后）
   const peBuy  = (rf!=null && target!=null) ? Number((1/(rf+target+DELTA)*factor).toFixed(2)) : null;
   const peSell = (rf!=null && target!=null && (rf+target-DELTA)>0) ? Number((1/(rf+target-DELTA)*factor).toFixed(2)) : null;
   const fairRange = (peBuy!=null && peSell!=null) ? `${peBuy} ~ ${peSell}` : "";
@@ -362,33 +602,45 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     requestBody: {
       requests: [
         ...pctRowsAbs.map(r => ({
-          repeatCell: { range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-            cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }
+          repeatCell: {
+            range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
         })),
         ...numberRowsAbs.map(r => ({
-          repeatCell: { range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-            cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }
+          repeatCell: {
+            range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+            cell: { userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
         })),
+        // “指数”首行加粗 + 浅灰底
         {
-          repeatCell: { range:{ sheetId, startRowIndex: base+0, endRowIndex: base+1, startColumnIndex:0, endColumnIndex:5 },
-            cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
-            fields:"userEnteredFormat(backgroundColor,textFormat)" }
+          repeatCell: {
+            range: { sheetId, startRowIndex: base+0, endRowIndex: base+1, startColumnIndex:0, endColumnIndex:5 },
+            cell: { userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+            fields: "userEnteredFormat(backgroundColor,textFormat)"
+          }
         },
+        // 分块外框
         {
-          updateBorders: { range:{ sheetId, startRowIndex: base, endRowIndex: base + totalRows, startColumnIndex:0, endColumnIndex:5 },
+          updateBorders: {
+            range: { sheetId, startRowIndex: base, endRowIndex: base + totalRows, startColumnIndex:0, endColumnIndex:5 },
             top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
             bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
             left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-            right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }
+            right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } }
+          }
         }
       ]
     }
   });
 
-  return endRow + 2; // 分块之间留 1 行空白
+  return endRow + 2;
 }
 
-// ---------- 邮件 ----------
+// ---------- 邮件（DEBUG 完整） ----------
 async function sendEmailIfEnabled(summaryHtml){
   const {
     SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
@@ -448,7 +700,7 @@ async function sendEmailIfEnabled(summaryHtml){
   const roe_hs = await roeFromDanjuan(["https://danjuanfunds.com/index-detail/SH000300"]);
   row = await writeBlock(row,"沪深300", pe_hs, rf_cn, null, null, null, roe_hs);
 
-  // 2) SP500
+  // 2) SPX
   const rf_us  = await rfUS();
   const { v:erp_us_v, tag:erp_us_tag, link:erp_us_link } = await erpUS();
   const pe_spx = await peSPX();
