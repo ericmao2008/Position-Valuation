@@ -1,8 +1,8 @@
-// Version: V2.2
+// Version: V2.3
 // Change:
-// 1) 修复 Nikkei PER 抓取：优先 Playwright DOM，回退 HTML <tr>/<td> 解析；文本兜底去除
-// 2) 修复空字符串被 Number("") 变 0 的问题，避免写入 0 导致 Infinity
-// 3) 其余保持与 V2.1 一致
+// 1) 将 δ（容忍带）等价映射到 P/E 空间：新增 买点PE上限 / 卖点PE下限 / 合理PE区间 三条阈值
+// 2) 保留原“对应P/E上限 = 1/(r_f + ERP*)”作为中枢参考
+// 3) 其他逻辑与 V2.2 保持一致（包含 Nikkei DOM/HTML 抓取与 “空值不写0” 修复）
 
 // HS300 + S&P500 + Nikkei225 —— 三块详表；HS300 仅用 index-detail/SH000300；SPX 优先 index-detail；Nikkei 用官方档案页：Index Weight Basis
 // E/P、r_f、隐含ERP、目标ERP*、容忍带δ 显示为百分比；大量 [DEBUG]；绝不写 0。
@@ -379,7 +379,7 @@ async function peNikkei(){
 async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLink){
   const { sheetTitle, sheetId } = await ensureToday();
 
-  // 关键修复：禁止把 "" 变成 0
+  // 严禁把 "" 变成 0
   const pe = (peRes==null || peRes.v==="" || peRes.v==null) ? null : Number(peRes.v);
   const rf = Number.isFinite(rfRes?.v) ? rfRes.v : null;
   const target = (label==="沪深300") ? ERP_TARGET_CN : erpStar;
@@ -388,7 +388,14 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const implied = (ep!=null && Number.isFinite(rf)) ? (ep - rf) : null;
   const peLimit = (Number.isFinite(rf) && Number.isFinite(target)) ? Number((1/(rf+target)).toFixed(2)) : null;
 
-  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit });
+  // —— 新增三条 P/E 阈值（把 δ 映射到 P/E 空间）——
+  const denomBuy  = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target + DELTA) : null;
+  const denomSell = (Number.isFinite(rf) && Number.isFinite(target)) ? (rf + target - DELTA) : null;
+
+  const peBuyUpper  = (denomBuy  != null && denomBuy  > 0) ? Number((1/denomBuy ).toFixed(2)) : null; // 低估买点的 P/E 上限
+  const peSellLower = (denomSell != null && denomSell > 0) ? Number((1/denomSell).toFixed(2)) : null; // 高估卖点的 P/E 下限
+
+  dbg(`${label} values`, { pe, rf, target, ep, implied, peLimit, peBuyUpper, peSellLower });
 
   let status="需手动更新";
   if (implied!=null && Number.isFinite(target)) {
@@ -396,6 +403,11 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     else if (implied <= target - DELTA) status="🔴 卖点（高估）";
     else status="🟡 持有（合理）";
   }
+
+  const fairRange =
+    (peBuyUpper!=null && peSellLower!=null)
+      ? `${peBuyUpper} ~ ${peSellLower}`
+      : "";
 
   const rows = [
     ["字段","数值","数据","说明","数据源"],
@@ -407,7 +419,11 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
     ["目标 ERP*", (label==="沪深300"? ERP_TARGET_CN : (Number.isFinite(target)?target:"")), (label==="沪深300"?"真实":(Number.isFinite(target)?"真实":"兜底")),
       (label==="沪深300"?"建议参考达摩达兰":"达摩达兰"), erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换","—"],
-    ["对应P/E上限 = 1/(r_f + ERP*)", peLimit ?? "", (peLimit!=null)?"真实":"兜底", "直观对照","—"],
+    ["对应P/E上限 = 1/(r_f + ERP*)", peLimit ?? "", (peLimit!=null)?"真实":"兜底", "直观对照（中枢）","—"],
+    // —— 新增三条：把 δ 映射进 P/E 空间 ——
+    ["买点PE上限 = 1/(r_f + ERP* + δ)", peBuyUpper ?? "", (peBuyUpper!=null)?"真实":"兜底", "低估买点的直观阈值","—"],
+    ["卖点PE下限 = 1/(r_f + ERP* − δ)", peSellLower ?? "", (peSellLower!=null)?"真实":"兜底", "高估卖点的直观阈值（需分母>0）","—"],
+    ["合理PE区间（买点上限 ~ 卖点下限）", fairRange, (peBuyUpper!=null && peSellLower!=null)?"真实":"兜底", "合理持有的直观区间","—"],
     ["判定", status, (implied!=null && Number.isFinite(target))?"真实":"兜底", "买点/持有/卖点/需手动","—"],
   ];
 
@@ -415,23 +431,26 @@ async function writeBlock(startRow, label, peRes, rfRes, erpStar, erpTag, erpLin
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  // 百分比格式化
+  // 百分比格式化：E/P、r_f、隐含ERP、ERP*、δ
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
-      requests: [{
-        repeatCell: {
-          range: {
-            sheetId,
-            startRowIndex: (startRow - 1) + 3,
-            endRowIndex:   (startRow - 1) + 8,
-            startColumnIndex: 1,
-            endColumnIndex:   2
-          },
-          cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
-          fields: "userEnteredFormat.numberFormat"
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: (startRow - 1) + 3,  // 第4行(E/P)
+              endRowIndex:   (startRow - 1) + 8,  // 第8行(δ) 之后不含
+              startColumnIndex: 1,                // B 列
+              endColumnIndex:   2
+            },
+            cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
+            fields: "userEnteredFormat.numberFormat"
+          }
         }
-      }]
+        // （P/E 阈值为“倍数”，保持默认数字格式即可；如需两位小数，可再添加一个 repeatCell）
+      ]
     }
   });
 
