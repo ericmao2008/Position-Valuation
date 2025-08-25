@@ -175,7 +175,6 @@ async function erpFromDamodaran(countryRegex, fallbackPct){
 
     const row  = html.split(/<\/tr>/i).find(tr => new RegExp(countryRegex, "i").test(tr)) || "";
     const text = row.replace(/<[^>]+>/g, " ");
-    // 抓 2%~10% 之间的第一个百分数（与你现有 US 逻辑保持一致）
     const pcts = [...text.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m => Number(m[1]));
     dbg("erp* row pcts", countryRegex, pcts);
     const candidate = pcts.find(x => x > 2 && x < 10);
@@ -187,16 +186,8 @@ async function erpFromDamodaran(countryRegex, fallbackPct){
            link: `=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")` };
 }
 
-// 保留你原有 US 专用函数（向后兼容）
-async function erpUS(){
-  return erpFromDamodaran("United\\s*States|USA", 0.0433);
-}
-
-// 新增：日本 ERP*
-async function erpJP(){
-  // 你当前口径：Japan 为 5.27%
-  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527);
-}
+async function erpUS(){ return erpFromDamodaran("United\\s*States|USA", 0.0433); }
+async function erpJP(){  return erpFromDamodaran("^\\s*Japan\\s*$|Japan", 0.0527); }
 
 // ========== Danjuan：HS300 仅用 index-detail/SH000300；SPX 优先 index-detail ==========
 async function peHS300(){
@@ -338,30 +329,35 @@ async function peNikkei(){
     if(!r.ok) throw new Error("status not ok");
     const h = await r.text();
 
-    // 方式 A：直接基于表格结构提取 <tr><td>Date</td><td>Market Cap Basis</td><td>Index Weight Basis</td>
-    const rows = [...h.matchAll(
-      /<tr[^>]*>\s*<td[^>]*>\s*([A-Za-z]{3}\/\d{2}\/\d{4})\s*<\/td>\s*<td[^>]*>\s*(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>\s*<td[^>]*>\s*(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>\s*<\/tr>/gi
-    )];
+    // ---- 方式 A：HTML 表格逐行抓取（三列：日期、Market Cap、Index Weight）----
+    // 放宽匹配，允许单元格内部存在额外标签/空白；数字允许最多3位整数+最多4位小数
+    const rowRe = /<tr[^>]*>\s*<td[^>]*>[\s\S]*?([A-Za-z]{3}\/\d{2}\/\d{4})[\s\S]*?<\/td>\s*<td[^>]*>[\s\S]*?(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>\s*<td[^>]*>[\s\S]*?(\d{1,3}(?:\.\d{1,4})?)\s*<\/td>[\s\S]*?<\/tr>/gi;
+    const rows = [...h.matchAll(rowRe)];
     if(rows.length){
       const last = rows[rows.length - 1];
-      const v = Number(last[3]);   // 第三列 Index Weight Basis
-      dbg("Nikkei regex table last v", v, "date", last[1]);
-      if(Number.isFinite(v) && v > 0 && v < 1000){
-        return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
+      const dateStr = last[1];
+      const mc = Number(last[2]);
+      const iw = Number(last[3]);   // 第三列 Index Weight Basis
+      dbg("Nikkei html rows", rows.length, "last date", dateStr, "mc", mc, "iw", iw);
+      if(Number.isFinite(iw) && iw > 0 && iw < 1000){
+        return { v: iw, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
       }
     }
 
-    // 方式 B：纯文本兜底，找到最后一行含日期的行，并取其行内最后一个小数（对应第三列）
+    // ---- 方式 B：文本兜底 ----
+    // 1) 拿到含日期的最后一行
     const text = strip(h);
     const lines = text.split(/\n+/).map(s=>s.trim()).filter(Boolean);
     const dateRe = /[A-Za-z]{3}\/\d{2}\/\d{4}/;
     let lastLine = null;
     for(const line of lines){ if(dateRe.test(line)) lastLine = line; }
     if(lastLine){
-      const nums = [...lastLine.matchAll(/(\d{1,3}(?:\.\d{1,4})?)/g)].map(m=>Number(m[1])).filter(Number.isFinite);
-      // 该行通常含“日、两列数值”，取最后一个为 Index Weight Basis
-      const v = nums.length ? nums[nums.length-1] : null;
-      dbg("Nikkei text fallback v", v, "line", lastLine);
+      // 2) 去掉日期文本，避免 22/2025 干扰
+      const noDate = lastLine.replace(dateRe, " ").trim();
+      // 3) 只抓带小数点的数（列值），忽略纯整数
+      const decs = [...noDate.matchAll(/(\d{1,3}\.\d{1,4})/g)].map(m=>Number(m[1])).filter(Number.isFinite);
+      const v = decs.length ? decs[decs.length-1] : null; // 取最后一个 => 第三列
+      dbg("Nikkei text fallback decs", decs, "picked", v, "line", lastLine);
       if(Number.isFinite(v) && v > 0 && v < 1000){
         return { v, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER (Index Weight Basis)")` };
       }
