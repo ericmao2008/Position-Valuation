@@ -603,7 +603,7 @@ async function sendEmailIfEnabled(lines){
     ticker: "SHE:002027",
     priceFormula: `=GOOGLEFINANCE("SHE:002027","price")`,
     totalShares: 13760000000,     // 约137.6亿股（如有出入可在表内改“总股本”）
-    fairPE: 18,                   // 周期股合理PE（可按你口径调整）
+    fairPE: 25,                   // 周期股合理PE（可按你口径调整）
     currentProfit: 0,             // 周期股不参与估值也可留0
     averageProfit: 4600000000,    // ★ 46亿
     growthRate: 0.00,             // 周期股不依赖未来利润公式
