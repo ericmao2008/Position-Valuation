@@ -1,17 +1,16 @@
 /**
  * Version History
- * V4.6.0 - Nikkei Index via IMPORTXML
- * - Replaced Playwright scraping for Nikkei PE/PB with Google Sheets' IMPORTXML formulas.
- * - The script now writes formulas directly into the sheet for Nikkei index valuation, making it dynamic.
- * - Removed peNikkei() and pbNikkei() functions, reducing Playwright dependency.
- * - Adjusted the email summary to reflect that Nikkei's valuation is now live in the sheet.
+ * V4.7.0 - Formats & Subsidiary Discount
+ * - Global: stop using percentage display except for Subsidiary "折扣率".
+ * - Nikkei: keep P/E(TTM) via IMPORTXML; "合理PE区间" forced to two decimals via TEXT().
+ * - Moutai category -> 成长股.
+ * - Subsidiaries: add "折扣率 = 总市值/合理估值" (percentage display).
+ * - Email: Subsidiaries section now uses 折扣率 & 判定 from the sheet.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
-import fs from "fs";
-import path from "path";
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -98,6 +97,7 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 
+// ===== (Optional) VC DOM (only if USE_PW=1) =====
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -129,7 +129,6 @@ async function fetchVCMapDOM(){
                 break;
             }
         }
-        
         if (targetIndex !== -1) {
             const dataRow = rows[targetIndex];
             if (dataRow) {
@@ -222,7 +221,7 @@ async function erpFromDamodaran(re){
   return null;
 }
 async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpUS(){ return (await erpFromDamodaran(/(United\\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
@@ -244,12 +243,11 @@ async function fetchNifty50(){
 
         const peTitle = document.querySelector('title');
         if (peTitle) {
-            const peMatch = peTitle.textContent.match(/of NIFTY is ([\d\.]+)/);
+            const peMatch = peTitle.textContent.match(/of NIFTY is ([\\d\\.]+)/);
             if (peMatch && peMatch[1]) {
                 pe = parseFloat(peMatch[1]);
             }
         }
-        
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
@@ -261,20 +259,18 @@ async function fetchNifty50(){
                 pb = parseFloat(pbValueElement.textContent.trim());
             }
         }
-        
         return { pe, pb };
     });
     
     const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
     const pbRes = (Number.isFinite(values.pb) && values.pb > 0) ? { v: values.pb, tag: "真实", link: `=HYPERLINK("${url}","Nifty PB")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PB")` };
-    
     return { peRes, pbRes };
   } finally {
     await br.close();
   }
 }
 
-// ===== 写块 & 判定 =====
+// ===== 宽基块 & 判定（全局改：去掉百分比显示） =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
@@ -298,107 +294,176 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
-    ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
+    ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，不显示百分比）","—"],
     ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", rfLabel, rfRes?.link || "—"],
     ["目标 ERP*", (Number.isFinite(erpStar)?erpStar:""), (Number.isFinite(erpStar)?"真实":"兜底"), "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）","—"],
     ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点=1/(r_f+ERP*+δ)×factor","—"],
     ["卖点PE下限（含ROE因子）", peSell ?? "", (peSell!=null)?"真实":"兜底", "卖点=1/(r_f+ERP*−δ)×factor","—"],
     ["合理PE区间（含ROE因子）", fairRange, (peBuy!=null && peSell!=null)?"真实":"兜底", "买点上限 ~ 卖点下限","—"],
-    ["ROE（TTM）", roe ?? "", roeRes?.tag || "—", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
-    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],
-    ["ROE倍数因子 = ROE/ROE基准", factorDisp, (factorDisp!=="")?"真实":"兜底", "例如 16.4%/12% = 1.36","—"],
+    ["ROE（TTM）", roe ?? "", roeRes?.tag || "—", "盈利能力（小数，不显示百分比）", roeRes?.link || "—"],
+    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12","—"],
+    ["ROE倍数因子 = ROE/ROE基准", factorDisp, (factorDisp!=="")?"真实":"兜底", "例如 0.164/0.12=1.36","—"],
     ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点","—"],
     ["判定", status, (Number.isFinite(pe) && peBuy!=null && peSell!=null)?"真实":"兜底", "基于 P/E 与区间","—"],
   ];
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+
+  // ---- 全部改为“数字小数显示”，不再用百分比（子公司折扣率除外） ----
   const requests = [];
-  // Format as Percentage
-  [2,3,4,5,10,11].forEach(i=>{ const r=(startRow-1)+i-1;
-    requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  // Format as Number
-  [1,7,8,12].forEach(i=>{ const r=(startRow-1)+i-1;
-    requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:startRow, startColumnIndex:0, endColumnIndex:5 },
-    cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } }, fields:"userEnteredFormat(backgroundColor,textFormat)" }});
+  // 对 B 列需要小数显示的行统一设置 0.0000 或 0.00（PE相关保留两位，其它四位更细）
+  const numberFmt = (rowIdx, pattern="0.0000") => ({
+    repeatCell:{ range:{ sheetId, startRowIndex:rowIdx, endRowIndex:rowIdx+1, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern } } }, fields:"userEnteredFormat.numberFormat" }
+  });
+
+  const headerRow = startRow-1;
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:headerRow, endRowIndex:headerRow+1, startColumnIndex:0, endColumnIndex:5 },
+      cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+      fields:"userEnteredFormat(backgroundColor,textFormat)"
+    }
+  });
+  // 边框
   requests.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
     top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
     bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
     left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
     right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
+
+  // 指定数值格式
+  const rowsTwoDecimals = [startRow+1-1, startRow+6-1, startRow+7-1]; // P/E, 买点PE, 卖点PE
+  rowsTwoDecimals.forEach(r => requests.push(numberFmt(r,"0.00")));
+  const rowsFourDecimals = [startRow+2-1, startRow+3-1, startRow+4-1, startRow+5-1, startRow+9-1, startRow+10-1]; // E/P, r_f, ERP*, δ, ROE, ROE基准
+  rowsFourDecimals.forEach(r => requests.push(numberFmt(r,"0.0000")));
+  // ROE倍数用两位
+  requests.push(numberFmt(startRow+11-1,"0.00"));
+
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
-// ===== 个股写块 & 判定 (Formula-based) =====
+// ===== 个股块（新增“折扣率”，并返回关键单元格地址以便邮件读取） =====
 async function writeStockBlock(startRow, config) {
-    const { sheetTitle, sheetId } = await ensureToday();
-    const { label, ticker, totalShares, fairPE, currentProfit, growthRate, category, priceFormula } = config;
+  const { sheetTitle, sheetId } = await ensureToday();
+  const { label, ticker, totalShares, fairPE, currentProfit, growthRate, category, priceFormula } = config;
 
-    // Constructing cell references for formulas
-    const priceRow = startRow + 1;
-    const mcRow = startRow + 2;
-    const shRow = startRow + 3;
-    const fairPERow = startRow + 4;
-    const currentProfitRow = startRow + 5;
-    const futureProfitRow = startRow + 6;
-    const fairValuationRow = startRow + 7;
-    const buyPointRow = startRow + 8;
-    const sellPointRow = startRow + 9;
-    const growthRateRow = startRow + 11;
+  // 统一“亿”单位
+  const E8 = 100000000;
 
-    const E8 = 100000000; // 1亿 for formatting
+  // 行定位
+  const headerRow           = startRow;
+  const priceRow            = startRow + 1;
+  const mcRow               = startRow + 2;
+  const shRow               = startRow + 3;
+  const fairPERow           = startRow + 4;
+  const currentProfitRow    = startRow + 5;
+  const futureProfitRow     = startRow + 6;
+  const fairValuationRow    = startRow + 7;
+  const discountRow         = startRow + 8;  // 新增：折扣率
+  const buyPointRow         = startRow + 9;
+  const sellPointRow        = startRow + 10;
+  const categoryRow         = startRow + 11;
+  const growthRateRow       = startRow + 12;
+  const judgmentRow         = startRow + 13;
 
-    const rows = [
-        ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
-        ["价格", priceFormula, "Formula", "实时价格", "Google Finance"],
-        ["总市值", `=(B${priceRow}*B${shRow})`, "Formula", "价格 × 总股本", "—"],
-        ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
-        ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
-        ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
-        ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
-        ["合理估值", `=B${currentProfitRow} * B${fairPERow}`, "Formula", "当年净利润 * 合理PE", "—"],
-        ["买点", `=MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2)`, "Formula", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
-        ["卖点", `=MAX(B${currentProfitRow}*50, B${futureProfitRow}*B${fairPERow}*1.5)`, "Formula", "Max(当年净利润*50, 3年后净利润*合理PE*1.5)", "—"],
-        ["类别", category, "Fixed", "—", "—"],
-        ["利润增速", growthRate, "Fixed", "用于计算3年后利润", "—"],
-        ["判定", `=IF(ISNUMBER(B${mcRow}), IF(B${mcRow} <= B${buyPointRow}, "🟢 低估", IF(B${mcRow} >= B${sellPointRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
-    ];
-    const end = startRow + rows.length - 1;
-    await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+  const rows = [
+    ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
+    ["价格", priceFormula, "Formula", "实时价格", "Google Finance"],
+    ["总市值", `=(B${priceRow}*B${shRow})`, "Formula", "价格 × 总股本", "—"],
+    ["总股本", totalShares / E8, "Fixed", "单位: 亿股", "用户提供"],
+    ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
+    ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
+    ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
+    ["合理估值", `=B${currentProfitRow} * B${fairPERow}`, "Formula", "当年净利润 * 合理PE", "—"],
+    ["折扣率", `=IFERROR(B${mcRow}/B${fairValuationRow},"")`, "Formula", "总市值 ÷ 合理估值（显示为百分比）", "—"], // 新增
+    ["买点", `=MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2)`, "Formula", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
+    ["卖点", `=MAX(B${currentProfitRow}*50, B${futureProfitRow}*B${fairPERow}*1.5)`, "Formula", "Max(当年净利润*50, 3年后净利润*合理PE*1.5)", "—"],
+    ["类别", category, "Fixed", "—", "—"],
+    ["利润增速", growthRate, "Fixed", "用于计算3年后利润", "—"],
+    ["判定", `=IF(ISNUMBER(B${mcRow}), IF(B${mcRow} <= B${buyPointRow}, "🟢 低估", IF(B${mcRow} >= B${sellPointRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
+  ];
+  const end = startRow + rows.length - 1;
+  await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-    const requests = [];
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-    requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-    
-    // Format to integer "亿"
-    [mcRow-1, currentProfitRow-1, futureProfitRow-1, fairValuationRow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+  // 样式：除“折扣率”外均用数字小数；折扣率用百分比
+  const requests = [];
+  // Header
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex: headerRow-1, endRowIndex: headerRow, startColumnIndex:0, endColumnIndex:5 },
+      cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+      fields:"userEnteredFormat(backgroundColor,textFormat)"
+    }
+  });
+  // 边框
+  requests.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
+    top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+    bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+    left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+    right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
+
+  // “亿”整型
+  const billionIntRows = [mcRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1, currentProfitRow-1];
+  billionIntRows.forEach(rIdx => {
+    requests.push({
+      repeatCell:{
+        range:{ sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 },
+        cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:'#,##0"亿"' } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
     });
-     // Format Buy/Sell points to integer "亿"
-    [buyPointRow-1, sellPointRow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-    // Format Total Shares to "亿" with decimals
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    // Format Price
-    [priceRow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-    // Format PE to integer
-    [fairPERow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-    // Format Growth Rate
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+  });
+  // 股本（亿）两位小数
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:'#,##0.00"亿"' } } },
+      fields:"userEnteredFormat.numberFormat"
+    }
+  });
+  // 价格两位小数
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:priceRow-1, endRowIndex:priceRow, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:'#,##0.00' } } },
+      fields:"userEnteredFormat.numberFormat"
+    }
+  });
+  // 合理PE整数
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:fairPERow-1, endRowIndex:fairPERow, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:'#,##0' } } },
+      fields:"userEnteredFormat.numberFormat"
+    }
+  });
+  // 增速（仍保留百分比，仅用于子公司“折扣率”之外？——根据需求：全局拒绝百分比，但你特别要求“折扣率”用百分比；增速是输入参数，更直观仍用百分比；若也要改为小数，将 pattern 调整为 0.0000 即可）
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.0000" } } },
+      fields:"userEnteredFormat.numberFormat"
+    }
+  });
+  // 折扣率百分比（唯一允许百分比显示）
+  requests.push({
+    repeatCell:{
+      range:{ sheetId, startRowIndex:discountRow-1, endRowIndex:discountRow, startColumnIndex:1, endColumnIndex:2 },
+      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } },
+      fields:"userEnteredFormat.numberFormat"
+    }
+  });
 
-    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
-    return { nextRow: end + 2 };
+  // 返回关键单元格地址（B列）
+  const discountAddr = `'${sheetTitle}'!B${discountRow}`;
+  const judgmentAddr = `'${sheetTitle}'!B${judgmentRow}`;
+  return { nextRow: end + 2, discountAddr, judgmentAddr, name: label };
 }
 
 // ===== Email =====
@@ -475,62 +540,72 @@ async function sendEmailIfEnabled(lines){
   let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
   row = res_ndx.nextRow;
 
-  // 4) Nikkei (Formula-based)
+  // 4) Nikkei (Formula-based; P/E IMPORTXML & 合理区间两端2位小数)
   {
-      const startRow = row;
-      const rfRes = await rf_jp_promise;
-      const erpRes = await erp_jp_promise;
+    const startRow = row;
+    const rfRes = await rf_jp_promise;
+    const erpRes = await erp_jp_promise;
 
-      const peRow = startRow + 1;
-      const pbRow = startRow + 2;
-      const epRow = startRow + 3;
-      const rfRow = startRow + 4;
-      const erpStarRow = startRow + 5;
-      const deltaRow = startRow + 6;
-      const peBuyRow = startRow + 7;
-      const peSellRow = startRow + 8;
-      const roeRow = startRow + 10;
-      const roeBaseRow = startRow + 11;
-      const factorRow = startRow + 12;
+    const peRow = startRow + 1;
+    const pbRow = startRow + 2;
+    const epRow = startRow + 3;
+    const rfRow = startRow + 4;
+    const erpStarRow = startRow + 5;
+    const deltaRow = startRow + 6;
+    const peBuyRow = startRow + 7;
+    const peSellRow = startRow + 8;
+    const roeRow = startRow + 10;
+    const roeBaseRow = startRow + 11;
+    const factorRow = startRow + 12;
 
-      const nikkei_rows = [
-          ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
-          ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
-          ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
-          ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数，显示为百分比）", "—"],
-          ["无风险利率 r_f（10Y名义）", rfRes.v, rfRes.tag, "JP 10Y", rfRes.link],
-          ["目标 ERP*", erpRes.v, erpRes.tag, "达摩达兰", erpRes.link],
-          ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
-          ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${factorRow}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
-          ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${factorRow}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
-          ["合理PE区间（含ROE因子）", `=IF(ISNUMBER(B${peBuyRow}), B${peBuyRow}&" ~ "&B${peSellRow}, "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
-          ["ROE（TTM）", `=IF(AND(ISNUMBER(B${pbRow}), ISNUMBER(B${peRow}), B${peRow}<>0), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
-          ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%", "—"],
-          ["ROE倍数因子 = ROE/ROE基准", `=IF(ISNUMBER(B${roeRow}), B${roeRow}/B${roeBaseRow}, "")`, "Formula", "例如 16.4%/12% = 1.36", "—"],
-          ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点", "—"],
-          ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
-      ];
-      const end = startRow + nikkei_rows.length - 1;
-      await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
-      
-      const requests = [];
-      // Percentage format
-      [4, 5, 6, 7, 11, 12].forEach(i => {
-          const r = (startRow - 1) + (i - 1);
-          requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-      });
-      // Number format (0.00)
-      [2, 3, 8, 9, 13].forEach(i => {
-          const r = (startRow - 1) + (i - 1);
-          requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00" } } }, fields: "userEnteredFormat.numberFormat" } });
-      });
-      // Header format
-      requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-      // Border format
-      requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-      
-      row = end + 2;
+    const nikkei_rows = [
+      ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
+      ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
+      ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
+      ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数；不显示百分比）", "—"],
+      ["无风险利率 r_f（10Y名义）", rfRes.v, rfRes.tag, "JP 10Y", rfRes.link],
+      ["目标 ERP*", erpRes.v, erpRes.tag, "达摩达兰", erpRes.link],
+      ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
+      ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${factorRow}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
+      ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${factorRow}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
+      ["合理PE区间（含ROE因子）", `=IF(AND(ISNUMBER(B${peBuyRow}),ISNUMBER(B${peSellRow})), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限（两端保留2位小数）", "—"],
+      ["ROE（TTM）", `=IF(AND(ISNUMBER(B${pbRow}), ISNUMBER(B${peRow}), B${peRow}<>0), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E（小数）", "—"],
+      ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12", "—"],
+      ["ROE倍数因子 = ROE/ROE基准", `=IF(ISNUMBER(B${roeRow}), B${roeRow}/B${roeBaseRow}, "")`, "Formula", "例如 0.164/0.12=1.36", "—"],
+      ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点", "—"],
+      ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
+    ];
+    const end = startRow + nikkei_rows.length - 1;
+    await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
+
+    // 样式（全部数字小数，不用百分比）
+    const req = [];
+    const numberFmt = (rowIdx, pattern="0.0000") => ({
+      repeatCell:{ range:{ sheetId, startRowIndex:rowIdx, endRowIndex:rowIdx+1, startColumnIndex:1, endColumnIndex:2 },
+        cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern } } }, fields:"userEnteredFormat.numberFormat" }
+    });
+    // Header
+    req.push({
+      repeatCell:{
+        range:{ sheetId, startRowIndex:startRow-1, endRowIndex:startRow, startColumnIndex:0, endColumnIndex:5 },
+        cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } },
+        fields:"userEnteredFormat(backgroundColor,textFormat)"
+      }
+    });
+    // 边框
+    req.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
+      top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
+      right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
+    // 两位小数：P/E、买/卖点PE
+    [startRow+1-1, startRow+7-1, startRow+8-1].forEach(r=>req.push(numberFmt(r,"0.00")));
+    // 四位小数：E/P、r_f、ERP*、δ、ROE、ROE基准
+    [startRow+2-1, startRow+3-1, startRow+4-1, startRow+5-1, startRow+10-1, startRow+11-1].forEach(r=>req.push(numberFmt(r,"0.0000")));
+    // ROE倍数两位
+    req.push(numberFmt(startRow+12-1,"0.00"));
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests:req } });
+    row = end + 2;
   }
 
   // 5) 中概互联50
@@ -587,35 +662,46 @@ async function sendEmailIfEnabled(lines){
     growthRate: 0.12,
     category: "成长股"
   };
-  row = (await writeStockBlock(row, tencentConfig)).nextRow;
+  const tencentRes = await writeStockBlock(row, tencentConfig);
+  row = tencentRes.nextRow;
   
-  // 10) 贵州茅台
+  // 10) 贵州茅台（类别改为“成长股”；价格用 IMPORTXML 抓 Google Finance 页面）
   const moutaiConfig = {
     label: "贵州茅台",
     ticker: "SHA:600519",
     priceFormula: `=IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@id='yDmH0d']/c-wiz[2]/div/div[4]/div/div/div[3]/ul/li[1]/a/div/div/div[2]/span/div/div")`,
     totalShares: 1256197800, // 约12.56亿股
-    fairPE: 30, // 消费龙头股的典型PE
+    fairPE: 30,
     currentProfit: 74753000000, // 约747.53亿 (2023年报)
     growthRate: 0.09,
-    category: "价值股"
+    category: "成长股" // <- 修改点
   };
-  row = (await writeStockBlock(row, moutaiConfig)).nextRow;
+  const moutaiRes = await writeStockBlock(row, moutaiConfig);
+  row = moutaiRes.nextRow;
 
   console.log("[DONE]", todayStr());
-  
-  const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
+  // ===== 邮件内容 =====
+  const roeFmt = (r) => r != null ? ` (ROE: ${ (r).toFixed(4) })` : ''; // 统一为小数，不显示百分比
   const lines = [
-    `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
-    `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
-    `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
-    `Nikkei Valuation → Please see the sheet for live judgments.`,
-    `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
-    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
-    `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
-    `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    `Tencent & Moutai Valuation → Please see the sheet for live judgments.`
+    `HS300 PE: ${res_hs.pe ?? "-"}${roeFmt(res_hs.roe)} → ${res_hs.judgment ?? "-"}`,
+    `SPX PE: ${res_sp.pe ?? "-"}${roeFmt(res_sp.roe)} → ${res_sp.judgment ?? "-"}`,
+    `NDX PE: ${res_ndx.pe ?? "-"}${roeFmt(res_ndx.roe)} → ${res_ndx.judgment ?? "-"}`,
+    `Nikkei Valuation → See sheet (P/E via IMPORTXML; 合理区间保留2位小数)。`,
+    `China Internet PE: ${res_cx.pe ?? "-"}${roeFmt(res_cx.roe)} → ${res_cx.judgment ?? "-"}`,
+    `HSTECH PE: ${res_hst.pe ?? "-"}${roeFmt(res_hst.roe)} → ${res_hst.judgment ?? "-"}`,
+    `DAX PE: ${res_dax.pe ?? "-"}${roeFmt(res_dax.roe)} → ${res_dax.judgment ?? "-"}`,
+    `Nifty 50 PE: ${res_in.pe ?? "-"}${roeFmt(res_in.roe)} → ${res_in.judgment ?? "-"}`,
   ];
+
+  // 从表里读取子公司的“折扣率”和“判定”字段，加入邮件
+  const readRanges = [tencentRes.discountAddr, tencentRes.judgmentAddr, moutaiRes.discountAddr, moutaiRes.judgmentAddr];
+  const gv = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SPREADSHEET_ID, ranges: readRanges });
+  const vals = gv.data.valueRanges?.map(v=> (v.values && v.values[0] ? v.values[0][0] : "")) || ["","","",""];
+  const [tDisc, tJudge, mDisc, mJudge] = vals;
+
+  lines.push(`【子公司】腾讯控股：折扣率 ${tDisc || "-"} → ${tJudge || "-"}`);
+  lines.push(`【子公司】贵州茅台：折扣率 ${mDisc || "-"} → ${mJudge || "-"}`);
+
   await sendEmailIfEnabled(lines);
 })();
