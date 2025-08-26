@@ -1,11 +1,11 @@
 /**
  * Version History
- * V3.0.0 - Final Production Version (patched)
+ * V3.0.0 - Final Production Version (Google-only Tencent)
  * - Nifty 50 scraper fixed (Trendlyne DOM).
- * - Tencent data fixed: robust Yahoo Finance DOM → API fallbacks → ENV overrides.
- * - "子公司/腾讯控股" block now writes even with partial data (judgment shows "需手动补充").
+ * - Tencent data: Google Finance → Google SERP → ENV overrides (no Yahoo).
+ * - "子公司/腾讯控股" block writes even with partial data (judgment "需手动补充").
  * - Title rows for "全市场宽基" and "子公司".
- * - Debug code removed except conditional logs.
+ * - Debug prints controlled by DEBUG_VERBOSE.
  */
 
 import fetch from "node-fetch";
@@ -322,150 +322,150 @@ async function fetchNifty50(){
   }
 }
 
-// ===== Tencent: Market Cap & Shares (PW DOM → APIs → ENV) =====
+// ===== Tencent: Market Cap & Shares via Google (Finance → SERP → ENV) =====
 async function fetchTencentData() {
   const toNum = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
   const parseAbbrev = (txt) => {
     if (!txt) return null;
-    const s = String(txt).trim().toUpperCase(); // "2.96T" | "950.3B" | "120.5M" | "2,345,678"
-    const m = s.match(/([\d.,]+)\s*([KMBT]?)/);
+    const s = String(txt).replace(/,/g, "").trim().toUpperCase(); // e.g. "HK$5.65T" | "9.08B" | "5650000000000"
+    const m = s.match(/(?:HK\$|HKD)?\s*([\d.]+)\s*([KMBT]?)/i);
     if (!m) return null;
-    const n = parseFloat(m[1].replace(/,/g, ""));
+    const n = parseFloat(m[1]);
     if (!Number.isFinite(n)) return null;
-    const unit = m[2] || "";
+    const unit = (m[2] || "").toUpperCase();
     const mul = unit === "T" ? 1e12 : unit === "B" ? 1e9 : unit === "M" ? 1e6 : unit === "K" ? 1e3 : 1;
     return n * mul;
   };
 
-  let marketCap = null;
-  let totalShares = null;
+  let marketCap = null;     // 港元
+  let totalShares = null;   // 股
 
-  // ENV overrides
   const envMc = toNum(process.env.TENCENT_MC_OVERRIDE);
   const envSh = toNum(process.env.TENCENT_SHARES_OVERRIDE);
 
-  // 1) Playwright DOM
+  // 1) Google Finance
   if (USE_PW) {
     try {
       const { chromium } = await import("playwright");
       const br  = await chromium.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled'] });
       const ctx = await br.newContext({
         userAgent: UA,
-        locale: 'zh-CN',
+        locale: 'en-US',
         timezoneId: TZ,
         viewport: { width: 1366, height: 900 }
       });
       const pg  = await ctx.newPage();
 
-      // 报价页 市值
-      const qUrl = "https://finance.yahoo.com/quote/0700.HK/";
-      await pg.goto(qUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      const gfUrl = "https://www.google.com/finance/quote/0700:HK?hl=en";
+      await pg.goto(gfUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+
       try {
-        const accept = await pg.$('button:has-text("Accept all"), button:has-text("同意全部")');
+        const accept = await pg.$('button:has-text("I agree"), button:has-text("Accept all"), button:has-text("同意")');
         if (accept) await accept.click();
       } catch {}
+
       await pg.waitForLoadState("networkidle").catch(()=>{});
-      await pg.waitForTimeout(1500);
+      await pg.waitForTimeout(1200);
 
-      const mcText = await pg.evaluate(() => {
-        const pick = (sel) => {
-          const el = document.querySelector(sel);
-          return el ? (el.textContent || "").trim() : null;
-        };
-        let txt = pick('[data-test="MARKET_CAP-value"]') || pick('td[data-test="MARKET_CAP-value"]');
-        if (txt) return txt;
-
-        const tryByRow = (labelRe) => {
-          const rows = Array.from(document.querySelectorAll('table tr'));
-          for (const tr of rows) {
-            const tds = Array.from(tr.querySelectorAll('td,th'));
-            if (tds.length >= 2) {
-              const key = (tds[0].textContent || '').trim();
-              const val = (tds[1].textContent || '').trim();
-              if (labelRe.test(key)) return val;
+      const kv = await pg.evaluate(() => {
+        const getValueAfterLabel = (labels) => {
+          const nodes = Array.from(document.querySelectorAll('div,span,td,th'));
+          const hasNumber = (t) => /[\d.,]+\s*[KMBT]?/i.test(t);
+          for (const n of nodes) {
+            const text = (n.textContent || '').trim();
+            if (labels.some(re => re.test(text))) {
+              let scope = n.closest('div') || n.parentElement;
+              if (!scope) continue;
+              const cand = Array.from(scope.querySelectorAll('*'))
+                .map(el => (el.textContent || '').trim())
+                .find(t => hasNumber(t) && !labels.some(re => re.test(t)));
+              if (cand) return cand;
+              let sib = scope.nextElementSibling;
+              for (let i=0; i<3 && sib; i++, sib = sib.nextElementSibling) {
+                const t = (sib.textContent || '').trim();
+                if (hasNumber(t) && !labels.some(re => re.test(t))) return t;
+              }
             }
           }
           return null;
         };
-        txt = tryByRow(/Market\s*cap/i) || tryByRow(/市值/);
-        return txt;
+        const mcText = getValueAfterLabel([/^\s*Market\s*cap\s*$/i, /^\s*市值\s*$/]);
+        const shText = getValueAfterLabel([/^\s*Shares\s*outstanding\s*$/i, /^\s*流通股本\s*$/, /^\s*总股本\s*$/]);
+        return { mcText, shText };
       });
-      if (mcText) marketCap = parseAbbrev(mcText) ?? toNum(mcText);
 
-      // 关键统计页 总股本
-      const ksUrl = "https://finance.yahoo.com/quote/0700.HK/key-statistics";
-      await pg.goto(ksUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await pg.waitForLoadState("networkidle").catch(()=>{});
-      await pg.waitForTimeout(1500);
-
-      const shText = await pg.evaluate(() => {
-        const pick = (sel) => {
-          const el = document.querySelector(sel);
-          return el ? (el.textContent || "").trim() : null;
-        };
-        let txt = pick('[data-test="SHARES_OUTSTANDING-value"]');
-        if (txt) return txt;
-
-        const rows = Array.from(document.querySelectorAll('table tr'));
-        for (const tr of rows) {
-          const tds = Array.from(tr.querySelectorAll('td,th'));
-          if (tds.length >= 2) {
-            const key = (tds[0].textContent || '').trim();
-            const val = (tds[1].textContent || '').trim();
-            if (/Shares\s*Outstanding/i.test(key) || /流通股本|总股本/.test(key)) {
-              return val;
-            }
-          }
-        }
-        return null;
-      });
-      if (shText) totalShares = parseAbbrev(shText) ?? toNum(shText);
+      if (kv?.mcText)      marketCap   = parseAbbrev(kv.mcText) ?? toNum(kv.mcText);
+      if (kv?.shText)      totalShares = parseAbbrev(kv.shText) ?? toNum(kv.shText);
 
       await br.close();
-      dbg("Tencent(PW) mc/sh", marketCap, totalShares);
+      dbg("Tencent(Google Finance) mc/sh", marketCap, totalShares);
     } catch (e) {
-      dbg("Tencent(PW DOM) err", e.message);
+      dbg("Tencent(GF) err", e.message);
     }
   }
 
-  // 2) Yahoo JSON APIs（补齐缺项）
-  if (!marketCap || !totalShares) {
+  // 2) Google SERP（仅市值兜底）
+  if (USE_PW && !marketCap) {
     try {
-      const url = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/0700.HK?modules=price,defaultKeyStatistics";
-      const r = await fetch(url, {
-        headers: {
-          "User-Agent": UA,
-          "Accept": "application/json,text/plain,*/*",
-          "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-        },
-        timeout: 15000
+      const { chromium } = await import("playwright");
+      const br  = await chromium.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled'] });
+      const ctx = await br.newContext({
+        userAgent: UA,
+        locale: 'en-US',
+        timezoneId: TZ,
+        viewport: { width: 1280, height: 900 }
       });
-      if (r.ok) {
-        const j = await r.json();
-        const res = j?.quoteSummary?.result?.[0] || {};
-        marketCap   = marketCap   || toNum(res?.price?.marketCap?.raw ?? res?.defaultKeyStatistics?.enterpriseValue?.raw);
-        totalShares = totalShares || toNum(res?.defaultKeyStatistics?.sharesOutstanding?.raw ?? res?.price?.sharesOutstanding?.raw);
+      const pg  = await ctx.newPage();
+
+      const gUrl = "https://www.google.com/search?q=0700.HK+market+cap";
+      await pg.goto(gUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      try {
+        const accept = await pg.$('button:has-text("I agree"), button:has-text("Accept all"), button:has-text("同意")');
+        if (accept) await accept.click();
+      } catch {}
+      await pg.waitForLoadState("networkidle").catch(()=>{});
+      await pg.waitForTimeout(1000);
+
+      const mkt = await pg.evaluate(() => {
+        const nodes = Array.from(document.querySelectorAll('div,span'));
+        for (const n of nodes) {
+          const t = (n.textContent || '').trim();
+          if (/Market\s*capitalisation/i.test(t)) {
+            const row = n.closest('div') || n.parentElement;
+            if (!row) continue;
+            const cand1 = row.nextElementSibling?.textContent?.trim();
+            if (cand1) return cand1;
+            const cand2 = row.parentElement?.querySelector('span')?.textContent?.trim();
+            if (cand2) return cand2;
+          }
+        }
+        const big = document.querySelector('div[role="heading"] ~ div span');
+        return big ? big.textContent.trim() : null;
+      });
+
+      if (mkt) {
+        const s = mkt.replace(/,/g,'').trim();
+        let mc = null;
+        const m1 = s.match(/([\d.]+)\s*(trillion|billion|million)\s*(HKD|HK\$)?/i);
+        if (m1) {
+          const n = parseFloat(m1[1]);
+          const unit = m1[2].toLowerCase();
+          const ccy  = (m1[3]||'HKD').toUpperCase();
+          const mul = unit==='trillion'?1e12:unit==='billion'?1e9:unit==='million'?1e6:1;
+          if ((ccy === 'HKD' || ccy === 'HK$') && Number.isFinite(n)) mc = n * mul;
+        }
+        if (!mc) mc = parseAbbrev(s);
+        if (mc) marketCap = mc;
       }
+
+      await br.close();
+      dbg("Tencent(Google SERP) mc", marketCap);
     } catch (e) {
-      dbg("Tencent(YF summary) err", e.message);
-    }
-  }
-  if (!marketCap || !totalShares) {
-    try {
-      const url = "https://query2.finance.yahoo.com/v7/finance/quote?symbols=0700.HK";
-      const r = await fetch(url, { headers: { "User-Agent": UA }, timeout: 12000 });
-      if (r.ok) {
-        const j = await r.json();
-        const res = j?.quoteResponse?.result?.[0] || {};
-        marketCap   = marketCap   || toNum(res?.marketCap);
-        totalShares = totalShares || toNum(res?.sharesOutstanding);
-      }
-    } catch (e) {
-      dbg("Tencent(YF quote) err", e.message);
+      dbg("Tencent(SERP) err", e.message);
     }
   }
 
-  // 3) ENV 覆盖（最后覆盖缺项）
+  // 3) ENV 兜底
   marketCap   = marketCap   || envMc || null;
   totalShares = totalShares || envSh || null;
 
@@ -537,7 +537,7 @@ async function writeStockBlock(startRow, label, data) {
 
     const rows = [
         ["个股", label, "真实", "个股估值分块", "—"],
-        ["总市值", marketCap, "抓取", "单位：元", "—"],
+        ["总市值", marketCap, "抓取", "单位：港元", "—"],
         ["总股本", totalShares, "抓取", "单位：股", "—"],
         ["价格", price ?? "", "计算", "总市值 / 总股本", "—"],
         ["合理PE", fairPE, "固定值", "成长股-腾讯-25倍", "—"],
@@ -749,7 +749,7 @@ async function sendEmailIfEnabled(lines){
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    `Tencent Market Cap: ${res_tencent.marketCap ? (res_tencent.marketCap / 1e12).toFixed(2) + '万亿' : '-'} → ${res_tencent.judgment ?? "-"}`
+    `Tencent Market Cap: ${res_tencent.marketCap ? (res_tencent.marketCap / 1e12).toFixed(2) + '万亿HKD' : '-'} → ${res_tencent.judgment ?? "-"}`
   ];
   await sendEmailIfEnabled(lines);
 })();
