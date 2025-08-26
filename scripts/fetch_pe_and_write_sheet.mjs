@@ -291,7 +291,7 @@ async function fetchNifty50(){
         let pb = null;
 
         // New PE Logic based on debug file
-        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
+        const peElement = document.querySelector('div.bullet-graph');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
             if (titleAttr) {
