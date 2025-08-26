@@ -583,7 +583,7 @@ async function sendEmailIfEnabled(lines){
   const moutaiConfig = {
     label: "贵州茅台",
     ticker: "SHA:600519",
-    priceFormula: `=IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@id='yDmH0d']/c-wiz[2]/div/div[4]/div/div/div[3]/ul/li[1]/a/div/div/div[2]/span/div/div")`,
+    priceFormula: `=getSinaPrice("sh600519")`,
     totalShares: 1256197800,
     fairPE: 30,
     currentProfit: 74753000000,
