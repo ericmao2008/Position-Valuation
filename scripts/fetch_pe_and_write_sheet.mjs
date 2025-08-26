@@ -1,6 +1,6 @@
 /**
  * Version History
- * V4.5.1 - Corrected Moutai's IMPORTXML formula based on user feedback.
+ * V4.5.2 - Corrected Moutai's IMPORTXML formula based on user feedback.
  * - The XPath for scraping Moutai's price has been updated to the user-provided specific path.
  * - Tencent's logic remains formula-based using GOOGLEFINANCE.
  * - All other logic is unchanged.
@@ -582,7 +582,7 @@ async function sendEmailIfEnabled(lines){
   const moutaiConfig = {
     label: "贵州茅台",
     ticker: "SHA:600519",
-    priceFormula: `=SUBSTITUTE(IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@data-last-price]"), ",", "")`,
+    priceFormula: `=IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@id='yDmH0d']/c-wiz[2]/div/div[4]/div/div/div[3]/ul/li[1]/a/div/div/div[2]/span/div/div")`,
     totalShares: 1256197800, // 约12.56亿股
     fairPE: 30, // 消费龙头股的典型PE
     currentProfit: 74753000000, // 约747.53亿 (2023年报)
