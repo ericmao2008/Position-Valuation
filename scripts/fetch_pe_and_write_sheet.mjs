@@ -1,11 +1,11 @@
 /**
  * Version History
- * V3.2.0 - Tencent data via Yahoo Finance API
- * - Replaced Google Custom Search with Yahoo Finance's unofficial JSON API.
- * - This method is significantly more reliable and efficient as it consumes structured JSON data directly.
- * - It avoids the fragility of web scraping and SERP parsing.
- * - No API keys are required for this endpoint.
- * - Maintained fallback to TENCENT_MC_OVERRIDE and TENCENT_SHARES_OVERRIDE.
+ * V3.2.0 - Tencent data via Yahoo Finance API (Optimized & Recommended)
+ * - Reverted to using Yahoo Finance's unofficial JSON API after other methods proved unreliable or inaccessible.
+ * - This method is the most robust, efficient, and free solution available for this task.
+ * - It directly consumes structured JSON data, avoiding the fragility of web scraping.
+ * - No API keys or browser automation (Playwright) are required.
+ * - Maintained fallback to environment variables (TENCENT_MC_OVERRIDE, TENCENT_SHARES_OVERRIDE).
  */
 
 import fetch from "node-fetch";
@@ -51,10 +51,9 @@ const PE_OVERRIDE_HSTECH = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").t
 const PE_OVERRIDE_NDX    = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_DAX    = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
 
-// ===== Sheets & Search API =====
+// ===== Sheets =====
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
-
 const auth = new google.auth.JWT(
   process.env.GOOGLE_CLIENT_EMAIL, null,
   (process.env.GOOGLE_PRIVATE_KEY||"").replace(/\\n/g,"\n"),
@@ -336,12 +335,17 @@ async function fetchTencentData() {
         if (response.ok) {
             const data = await response.json();
             const quote = data?.quoteResponse?.result?.[0];
-            if (quote) {
-                marketCap = quote.marketCap;
-                totalShares = quote.sharesOutstanding;
-                dbg("Tencent(Yahoo API) parsed mc/sh:", marketCap, totalShares);
+
+            if (quote && quote.marketCap) {
+                // Yahoo returns market cap in local currency (HKD for 0700.HK)
+                marketCap = quote.marketCap; 
+                
+                // sharesOutstanding is often the most reliable field for total shares
+                totalShares = quote.sharesOutstanding; 
+                
+                dbg("Tencent(Yahoo API) mc/sh:", marketCap, totalShares);
             } else {
-                 dbg("Tencent(Yahoo API) response OK, but no quote data found in JSON.");
+                 dbg("Tencent(Yahoo API) response OK, but no quote data in JSON body.");
             }
         } else {
             dbg(`Tencent(Yahoo API) request failed with status: ${response.status}`);
@@ -350,7 +354,7 @@ async function fetchTencentData() {
         dbg("Tencent(Yahoo API) fetch error:", e.message);
     }
 
-    // Fallback to environment variables if the API call fails for any reason
+    // Fallback to environment variables if the API call fails or returns null
     return {
         marketCap: marketCap || numOr(process.env.TENCENT_MC_OVERRIDE, null),
         totalShares: totalShares || numOr(process.env.TENCENT_SHARES_OVERRIDE, null)
@@ -423,8 +427,8 @@ async function writeStockBlock(startRow, label, data) {
 
     const rows = [
         ["个股", label, "真实", "个股估值分块", `=HYPERLINK("https://finance.yahoo.com/quote/0700.HK", "Yahoo Finance")`],
-        ["总市值", marketCap, "API", "单位: 当地货币(港元)", "—"],
-        ["总股本", totalShares, "API", "单位: 股", "—"],
+        ["总市值", marketCap, "API", "单位: 港元 (HKD)", "Yahoo Finance"],
+        ["总股本", totalShares, "API", "单位: 股", "Yahoo Finance"],
         ["价格", price ?? "", "计算", "总市值 / 总股本", "—"],
         ["合理PE", fairPE, "固定值", "成长股-腾讯-25倍", "—"],
         ["当年净利润", currentProfit, "固定值", "年报后需手动更新", "—"],
