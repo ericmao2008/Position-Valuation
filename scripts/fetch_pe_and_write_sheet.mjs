@@ -1,12 +1,11 @@
 /**
  * Version History
- * V4.1.0 - Final Recommended Version: Google Sheets Native Integration
- * - Implemented the user's suggestion to use the built-in GOOGLEFINANCE function for market cap.
- * - Set a fixed value for total shares (9.772 billion) as provided by the user.
- * - Removed the fetchTencentData function entirely from the Node.js script.
- * - The script no longer fetches any stock data. It writes GOOGLEFINANCE formulas and fixed values directly into the sheet.
- * - All dependent calculations (price, judgment, etc.) are now also offloaded to the sheet as formulas.
- * - This is the most robust, reliable, and efficient solution.
+ * V4.2.0 - Final Recommended Version: Multi-Stock Formula-Based Logic
+ * - Modified Tencent logic to fetch price via GOOGLEFINANCE and calculate market cap within the sheet.
+ * - Added Kweichow Moutai (600519.SHA) with the same formula-based logic.
+ * - Implemented custom number formatting to display most financial values in "hundreds of millions" (亿 units).
+ * - Fixed data for Moutai (Total Shares, Net Profit) is based on public financial records.
+ * - The script is now a powerful template generator for self-calculating stock valuation blocks in Google Sheets.
  */
 
 import fetch from "node-fetch";
@@ -382,14 +381,14 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
 }
 
 // ===== 个股写块 & 判定 (Formula-based) =====
-async function writeStockBlock(startRow, label, fixedData) {
+async function writeStockBlock(startRow, config) {
     const { sheetTitle, sheetId } = await ensureToday();
-    const { totalShares, fairPE, currentProfit, growthRate, category } = fixedData;
+    const { label, ticker, totalShares, fairPE, currentProfit, growthRate, category } = config;
 
     // Constructing cell references for formulas
-    const mcRow = startRow + 1;
-    const shRow = startRow + 2;
-    const priceRow = startRow + 3;
+    const priceRow = startRow + 1;
+    const mcRow = startRow + 2;
+    const shRow = startRow + 3;
     const fairPERow = startRow + 4;
     const currentProfitRow = startRow + 5;
     const futureProfitRow = startRow + 6;
@@ -398,13 +397,15 @@ async function writeStockBlock(startRow, label, fixedData) {
     const sellPointRow = startRow + 9;
     const growthRateRow = startRow + 11;
 
+    const E8 = 100000000; // 1亿 for formatting
+
     const rows = [
-        ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/0700:HKG", "Google Finance")`],
-        ["总市值", `=GOOGLEFINANCE("HKG:0700", "marketcap")`, "Formula", "单位: 港元 (HKD)", "Google Finance"],
-        ["总股本", totalShares, "Fixed", "单位: 股", "用户提供"],
-        ["价格", `=B${mcRow}/B${shRow}`, "Formula", "总市值 / 总股本", "—"],
-        ["合理PE", fairPE, "Fixed", "成长股-腾讯-25倍", "—"],
-        ["当年净利润", currentProfit, "Fixed", "年报后需手动更新", "—"],
+        ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
+        ["价格", `=GOOGLEFINANCE("${ticker}", "price")`, "Formula", "实时价格", "Google Finance"],
+        ["总市值", `=(B${priceRow}*B${shRow})/${E8}`, "Formula", "价格 × 总股本", "—"],
+        ["总股本", totalShares, "Fixed", "单位: 股", "用户提供"],
+        ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
+        ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
         ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
         ["合理估值", `=B${currentProfitRow} * B${fairPERow}`, "Formula", "当年净利润 * 合理PE", "—"],
         ["买点", `=MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2)`, "Formula", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
@@ -417,16 +418,22 @@ async function writeStockBlock(startRow, label, fixedData) {
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
     const requests = [];
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1) + 0, endRowIndex: (startRow - 1) + 1, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-    // Format numbers
-    [mcRow-1, shRow-1, currentProfitRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" } });
+    
+    // Format to "亿"
+    [mcRow-1, currentProfitRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1].forEach(rIdx => {
+        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
     });
-    // Format price
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:priceRow-1, endRowIndex:priceRow+0, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } });
-    // Format percentage
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow+0, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+    // Format Total Shares
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" } });
+    // Format Price & PE
+    [priceRow-1, fairPERow-1].forEach(rIdx => {
+        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
+    });
+    // Format Growth Rate
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
     return { nextRow: end + 2 };
@@ -561,20 +568,30 @@ async function sendEmailIfEnabled(lines){
   row += 2;
 
   // 9) 腾讯控股
-  const tencentFixedData = {
+  const tencentConfig = {
+    label: "腾讯控股",
+    ticker: "HKG:0700",
     totalShares: 9772000000,
     fairPE: 25,
-    currentProfit: 2200e8,
+    currentProfit: 220000000000, // 2200亿
     growthRate: 0.12,
     category: "成长股"
   };
-  const res_tencent = await writeStockBlock(row, "腾讯控股", tencentFixedData);
-  row = res_tencent.nextRow;
-  
-  console.log("[DONE]", todayStr(), {
-    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
-    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, nifty_pe: res_in.pe,
-  });
+  row = (await writeStockBlock(row, tencentConfig)).nextRow;
+  
+  // 10) 贵州茅台
+  const moutaiConfig = {
+    label: "贵州茅台",
+    ticker: "SHA:600519",
+    totalShares: 1256197800, // 约12.56亿股
+    fairPE: 30, // 消费龙头股的典型PE
+    currentProfit: 74753000000, // 约747.53亿 (2023年报)
+    growthRate: 0.09,
+    category: "价值股"
+  };
+  row = (await writeStockBlock(row, moutaiConfig)).nextRow;
+
+  console.log("[DONE]", todayStr());
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
@@ -587,7 +604,7 @@ async function sendEmailIfEnabled(lines){
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    `Tencent Valuation → Please see the sheet for the live judgment.`
+    `Tencent & Moutai Valuation → Please see the sheet for live judgments.`
   ];
   await sendEmailIfEnabled(lines);
 })();
