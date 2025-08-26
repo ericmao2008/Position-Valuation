@@ -1,18 +1,16 @@
 /**
  * Version History
- * V2.9.12 - Final Nifty 50 Fix (Hybrid Scrape)
- * - Based on user's finding from debug files, the PE value is available in the <head> tags.
- * - The PB value is only available after the page renders.
- * - Rewrote `fetchNifty50` to use a hybrid strategy:
- * 1. Immediately scrapes the PE value from the <title> tag's content.
- * 2. Waits for the page to render and then scrapes the PB value from the rendered body.
- * - This should be the final, robust solution for trendlyne.com.
+ * V2.9.13 - Final Artifact Path Fix
+ * - The YML workflow now passes the GITHUB_WORKSPACE environment variable to the script.
+ * - The `fetchNifty50` function now uses this variable to save snapshot files to an absolute path.
+ * - This ensures the `upload-artifact` step can always find the debug files.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import fs from "fs";
+import path from "path"; // Import path module
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -286,20 +284,28 @@ async function fetchNifty50(){
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
     await pg.waitForTimeout(2000);
 
+    const workspace = process.env.GITHUB_WORKSPACE || '.';
+    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
+    const htmlPath = path.join(workspace, 'debug_page.html');
+
+    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
+    await pg.screenshot({ path: screenshotPath, fullPage: true });
+    const html = await pg.content();
+    fs.writeFileSync(htmlPath, html);
+    console.log("[DEBUG] Nifty50 snapshot files saved.");
+
     const values = await pg.evaluate(() => {
       let pe = null;
       let pb = null;
-
-      // Scrape PE from the meta description tag
-      const metaDesc = document.querySelector('meta[name="description"]');
-      if (metaDesc) {
-        const peMatch = metaDesc.content.match(/of NIFTY is ([\d\.]+)/);
-        if (peMatch) {
-            pe = parseFloat(peMatch[1]);
-        }
+      
+      const peHeading = document.querySelector('h1');
+      if (peHeading && peHeading.nextElementSibling) {
+          const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
+          if (peSpan) {
+              pe = parseFloat(peSpan.textContent.trim());
+          }
       }
-
-      // Scrape PB from the rendered body
+      
       const allLinks = Array.from(document.querySelectorAll('a.btn'));
       const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
       if (pbLink) {
