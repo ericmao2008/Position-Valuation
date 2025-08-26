@@ -1,6 +1,6 @@
 /**
  * Version History
- * V4.5.2 - Corrected Moutai's IMPORTXML formula based on user feedback.
+ * V4.5.1 - Corrected Moutai's IMPORTXML formula based on user feedback.
  * - The XPath for scraping Moutai's price has been updated to the user-provided specific path.
  * - Tencent's logic remains formula-based using GOOGLEFINANCE.
  * - All other logic is unchanged.
