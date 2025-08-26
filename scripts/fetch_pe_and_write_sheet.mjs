@@ -354,7 +354,6 @@ async function fetchTencentData() {
     }
 }
 
-
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
@@ -475,7 +474,7 @@ async function sendEmailIfEnabled(lines){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
     
     if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
+      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting.");
       process.exit(1);
     }
   }
@@ -559,12 +558,6 @@ async function sendEmailIfEnabled(lines){
   const nifty_data = await nifty_promise;
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
-  
-  if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
-    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
-    process.exit(1);
-  }
-
   let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
