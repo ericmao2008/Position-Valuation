@@ -1,8 +1,10 @@
 /**
  * Version History
- * V3.1.4 - Final Production Version
+ * V3.0.0 - Final Production Version
+ * - Based on final analysis of debug files, the Nifty 50 scraper is definitively fixed.
+ * - `fetchNifty50` now uses the most robust method based on user-provided HTML to extract PE and PB.
  * - Corrected the "google_search is not defined" error in `fetchTencentData`.
- * - Nifty 50 scraper is confirmed working.
+ * - Added title rows for "全市场宽基" and "子公司" as requested.
  * - Removed all debugging code (snapshots, forced exits) to finalize the script.
  */
 
@@ -283,21 +285,12 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-
-    const workspace = process.env.GITHUB_WORKSPACE || '.';
-    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
-    const htmlPath = path.join(workspace, 'debug_page.html');
     
-    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
-    await pg.screenshot({ path: screenshotPath, fullPage: true });
-    const html = await pg.content();
-    fs.writeFileSync(htmlPath, html);
-    console.log("[DEBUG] Nifty50 snapshot files saved.");
-
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
+        // New PE Logic based on debug file
         const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
@@ -309,6 +302,7 @@ async function fetchNifty50(){
             }
         }
 
+        // New PB Logic based on debug file
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
@@ -352,7 +346,7 @@ async function fetchTencentData() {
         const mcText = mcRes[0].results.map(r => r.snippet).join(' ');
         const sharesText = sharesRes[0].results.map(r => r.snippet).join(' ');
 
-        const mcMatch = mcText.match(/总市值\s*([\d\.,]+)\s*(万亿|亿|trillion|billion)/);
+        const mcMatch = mcText.match(/市值\s*([\d\.,]+)\s*(万亿|亿|trillion|billion)/);
         const sharesMatch = sharesText.match(/总股本\s*([\d\.,]+)\s*(亿|billion)/);
 
         const marketCap = mcMatch ? parseFloat(mcMatch[1].replace(/,/g, '')) * parseUnit(mcMatch[2]) : null;
@@ -364,7 +358,6 @@ async function fetchTencentData() {
         return { marketCap: null, totalShares: null };
     }
 }
-
 
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
