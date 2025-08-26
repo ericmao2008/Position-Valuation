@@ -1,11 +1,12 @@
 /**
  * Version History
- * V3.2.0 - Tencent data via Yahoo Finance API (Optimized & Recommended)
- * - Reverted to using Yahoo Finance's unofficial JSON API after other methods proved unreliable or inaccessible.
- * - This method is the most robust, efficient, and free solution available for this task.
- * - It directly consumes structured JSON data, avoiding the fragility of web scraping.
- * - No API keys or browser automation (Playwright) are required.
- * - Maintained fallback to environment variables (TENCENT_MC_OVERRIDE, TENCENT_SHARES_OVERRIDE).
+ * V4.1.0 - Final Recommended Version: Google Sheets Native Integration
+ * - Implemented the user's suggestion to use the built-in GOOGLEFINANCE function for market cap.
+ * - Set a fixed value for total shares (9.772 billion) as provided by the user.
+ * - Removed the fetchTencentData function entirely from the Node.js script.
+ * - The script no longer fetches any stock data. It writes GOOGLEFINANCE formulas and fixed values directly into the sheet.
+ * - All dependent calculations (price, judgment, etc.) are now also offloaded to the sheet as formulas.
+ * - This is the most robust, reliable, and efficient solution.
  */
 
 import fetch from "node-fetch";
@@ -322,46 +323,6 @@ async function fetchNifty50(){
   }
 }
 
-// ===== Tencent: Market Cap & Shares via Yahoo Finance API =====
-async function fetchTencentData() {
-    // This uses an unofficial Yahoo Finance API endpoint which returns clean JSON data.
-    // It is much faster and more reliable than scraping a web page.
-    const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=0700.HK';
-    let marketCap = null;
-    let totalShares = null;
-
-    try {
-        const response = await fetch(url, { headers: { "User-Agent": UA } });
-        if (response.ok) {
-            const data = await response.json();
-            const quote = data?.quoteResponse?.result?.[0];
-
-            if (quote && quote.marketCap) {
-                // Yahoo returns market cap in local currency (HKD for 0700.HK)
-                marketCap = quote.marketCap; 
-                
-                // sharesOutstanding is often the most reliable field for total shares
-                totalShares = quote.sharesOutstanding; 
-                
-                dbg("Tencent(Yahoo API) mc/sh:", marketCap, totalShares);
-            } else {
-                 dbg("Tencent(Yahoo API) response OK, but no quote data in JSON body.");
-            }
-        } else {
-            dbg(`Tencent(Yahoo API) request failed with status: ${response.status}`);
-        }
-    } catch (e) {
-        dbg("Tencent(Yahoo API) fetch error:", e.message);
-    }
-
-    // Fallback to environment variables if the API call fails or returns null
-    return {
-        marketCap: marketCap || numOr(process.env.TENCENT_MC_OVERRIDE, null),
-        totalShares: totalShares || numOr(process.env.TENCENT_SHARES_OVERRIDE, null)
-    };
-}
-
-
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
@@ -420,25 +381,37 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
-// ===== 个股写块 & 判定 =====
-async function writeStockBlock(startRow, label, data) {
+// ===== 个股写块 & 判定 (Formula-based) =====
+async function writeStockBlock(startRow, label, fixedData) {
     const { sheetTitle, sheetId } = await ensureToday();
-    const { marketCap, totalShares, price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, category, growthRate, judgmentText } = data;
+    const { totalShares, fairPE, currentProfit, growthRate, category } = fixedData;
+
+    // Constructing cell references for formulas
+    const mcRow = startRow + 1;
+    const shRow = startRow + 2;
+    const priceRow = startRow + 3;
+    const fairPERow = startRow + 4;
+    const currentProfitRow = startRow + 5;
+    const futureProfitRow = startRow + 6;
+    const fairValuationRow = startRow + 7;
+    const buyPointRow = startRow + 8;
+    const sellPointRow = startRow + 9;
+    const growthRateRow = startRow + 11;
 
     const rows = [
-        ["个股", label, "真实", "个股估值分块", `=HYPERLINK("https://finance.yahoo.com/quote/0700.HK", "Yahoo Finance")`],
-        ["总市值", marketCap, "API", "单位: 港元 (HKD)", "Yahoo Finance"],
-        ["总股本", totalShares, "API", "单位: 股", "Yahoo Finance"],
-        ["价格", price ?? "", "计算", "总市值 / 总股本", "—"],
-        ["合理PE", fairPE, "固定值", "成长股-腾讯-25倍", "—"],
-        ["当年净利润", currentProfit, "固定值", "年报后需手动更新", "—"],
-        ["3年后净利润", futureProfit, "计算", "当年净利润 * (1+增速)^3", "—"],
-        ["合理估值", fairValuation, "计算", "当年净利润 * 合理PE", "—"],
-        ["买点", buyPoint, "计算", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
-        ["卖点", sellPoint, "计算", "Max(当年净利润*50, 3年后净利润*合理PE*1.5)", "—"],
-        ["类别", category, "固定值", "—", "—"],
-        ["利润增速", growthRate, "固定值", "用于计算3年后利润", "—"],
-        ["判定", judgmentText, "计算", "基于 总市值 与 买卖点", "—"],
+        ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/0700:HKG", "Google Finance")`],
+        ["总市值", `=GOOGLEFINANCE("HKG:0700", "marketcap")`, "Formula", "单位: 港元 (HKD)", "Google Finance"],
+        ["总股本", totalShares, "Fixed", "单位: 股", "用户提供"],
+        ["价格", `=B${mcRow}/B${shRow}`, "Formula", "总市值 / 总股本", "—"],
+        ["合理PE", fairPE, "Fixed", "成长股-腾讯-25倍", "—"],
+        ["当年净利润", currentProfit, "Fixed", "年报后需手动更新", "—"],
+        ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
+        ["合理估值", `=B${currentProfitRow} * B${fairPERow}`, "Formula", "当年净利润 * 合理PE", "—"],
+        ["买点", `=MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2)`, "Formula", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
+        ["卖点", `=MAX(B${currentProfitRow}*50, B${futureProfitRow}*B${fairPERow}*1.5)`, "Formula", "Max(当年净利润*50, 3年后净利润*合理PE*1.5)", "—"],
+        ["类别", category, "Fixed", "—", "—"],
+        ["利润增速", growthRate, "Fixed", "用于计算3年后利润", "—"],
+        ["判定", `=IF(B${mcRow} <= B${buyPointRow}, "🟢 低估", IF(B${mcRow} >= B${sellPointRow}, "🔴 高估", "🟡 持有"))`, "Formula", "基于 总市值 与 买卖点", "—"],
     ];
     const end = startRow + rows.length - 1;
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
@@ -446,9 +419,17 @@ async function writeStockBlock(startRow, label, data) {
     const requests = [];
     requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1) + 0, endRowIndex: (startRow - 1) + 1, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
+    // Format numbers
+    [mcRow-1, shRow-1, currentProfitRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1].forEach(rIdx => {
+        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" } });
+    });
+    // Format price
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:priceRow-1, endRowIndex:priceRow+0, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0.00" } } }, fields: "userEnteredFormat.numberFormat" } });
+    // Format percentage
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow+0, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
-    return { nextRow: end + 2, judgment: judgmentText, marketCap };
+    return { nextRow: end + 2 };
 }
 
 // ===== Email =====
@@ -498,7 +479,6 @@ async function sendEmailIfEnabled(lines){
   const nifty_promise  = fetchNifty50();
   const rf_in_promise  = rfIN();
   const erp_in_promise = erpIN();
-  const tencent_promise = fetchTencentData();
   
   // --- "全市场宽基" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
@@ -580,52 +560,20 @@ async function sendEmailIfEnabled(lines){
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
   row += 2;
 
-  // 9) 腾讯控股 —— 允许部分写入
-  const tencentData = await tencent_promise;
-  let res_tencent = {};
-  {
-    const fairPE = 25;
-    const currentProfit = 2200e8;
-    const growthRate = 0.12;
-
-    const mc = tencentData.marketCap || null;
-    const sh = tencentData.totalShares || null;
-    const price = (mc && sh) ? (mc / sh) : null;
-
-    const futureProfit = currentProfit * Math.pow(1 + growthRate, 3);
-    const fairValuation = currentProfit * fairPE;
-    const buyPoint  = Math.min(fairValuation * 0.7, (futureProfit * fairPE) / 2);
-    const sellPoint = Math.max(currentProfit * 50, futureProfit * fairPE * 1.5);
-
-    let judgmentText = "需手动补充";
-    if (mc && sh) {
-      if (mc <= buyPoint)       judgmentText = "🟢 低估";
-      else if (mc >= sellPoint) judgmentText = "🔴 高估";
-      else                      judgmentText = "🟡 持有";
-    }
-
-    const processedData = {
-      marketCap: mc,
-      totalShares: sh,
-      price,
-      fairPE,
-      currentProfit,
-      futureProfit,
-      fairValuation,
-      buyPoint,
-      sellPoint,
-      category: "成长股",
-      growthRate,
-      judgmentText
-    };
-    res_tencent = await writeStockBlock(row, "腾讯控股", processedData);
-    row = res_tencent.nextRow;
-  }
+  // 9) 腾讯控股
+  const tencentFixedData = {
+    totalShares: 9772000000,
+    fairPE: 25,
+    currentProfit: 2200e8,
+    growthRate: 0.12,
+    category: "成长股"
+  };
+  const res_tencent = await writeStockBlock(row, "腾讯控股", tencentFixedData);
+  row = res_tencent.nextRow;
   
   console.log("[DONE]", todayStr(), {
     hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
     cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, nifty_pe: res_in.pe,
-    tencent_mc: res_tencent.marketCap
   });
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
@@ -639,7 +587,7 @@ async function sendEmailIfEnabled(lines){
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    `Tencent Market Cap: ${res_tencent.marketCap ? (res_tencent.marketCap / 1e12).toFixed(2) + '万亿HKD' : '-'} → ${res_tencent.judgment ?? "-"}`
+    `Tencent Valuation → Please see the sheet for the live judgment.`
   ];
   await sendEmailIfEnabled(lines);
 })();
