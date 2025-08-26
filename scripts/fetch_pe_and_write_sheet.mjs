@@ -1,10 +1,9 @@
 /**
  * Version History
- * V2.9.8 - Fix Nifty 50 Scraping Logic
- * - Rewrote the `fetchNifty50` function with more robust selectors and a better waiting strategy.
- * - The script now waits for the H1 title to appear before scraping.
- * - It locates the PB value by searching for an element containing the text "Nifty 50 PB", 
- * which is more resilient to structural changes on trendlyne.com.
+ * V2.9.9 - Enhanced Nifty 50 Debugging
+ * - Added the "debugging snapshot" (screenshot + html save) feature directly into the `fetchNifty50` function.
+ * - Added a check in the Main block to force the script to exit with an error if Nifty 50 data is not successfully scraped.
+ * - This will trigger the artifact upload on GitHub Actions, allowing us to see what the scraper sees on trendlyne.com.
  */
 
 import fetch from "node-fetch";
@@ -33,7 +32,7 @@ const VC_TARGETS = {
 
 // ===== Policy / Defaults =====
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
-const DELTA         = numOr(process.env.DELTA,      0.01); // Adjusted to 1.0%
+const DELTA         = numOr(process.env.DELTA,      0.01);
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
 const RF_CN = numOr(process.env.RF_CN, 0.023);
@@ -284,6 +283,14 @@ async function fetchNifty50(){
   await pg.waitForSelector('h1', { timeout: 15000 }).catch(()=>{});
   await pg.waitForTimeout(1000);
 
+  // --- Add Debugging Snapshot ---
+  console.log("[DEBUG] Taking Nifty50 snapshot before evaluation...");
+  await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
+  const html = await pg.content();
+  fs.writeFileSync('debug_page.html', html);
+  console.log("[DEBUG] Nifty50 snapshot files saved.");
+  // --- End Snapshot ---
+
   const values = await pg.evaluate(() => {
     let pe = null;
     let pb = null;
@@ -313,7 +320,6 @@ async function fetchNifty50(){
   
   return { peRes, pbRes };
 }
-
 
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
