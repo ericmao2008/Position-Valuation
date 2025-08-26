@@ -1,38 +1,10 @@
-好的，所有参数都已确认。
-
-我们将在脚本中正式引入\*\*“个股估值”模块\*\*，并为您量身定制的、针对“腾讯控股”这支成长股的估值模型写入代码。
-
-**最终模型参数确认:**
-
-  * **资产名称**: 腾讯控股
-  * **类别**: 成长股
-  * **合理PE**: 25
-  * **当年净利润**: 2200亿
-  * **利润增速**: 12%
-
------
-
-### **已添加“腾讯控股”个股估值模块的完整代码文件**
-
-这是包含了全新“个股估值”模块的完整脚本。其中：
-
-1.  新增了 `fetchTencentData` 函数，通过搜索引擎抓取腾讯的总市值和总股本。
-2.  新增了 `writeStockBlock` 函数，专门用于计算和生成个股的估值表格。
-3.  更新了主流程，将腾讯控股的完整分析添加到了每日任务中。
-4.  按照您的要求，将所有“判定”字段的显示方式，都统一更新为了“**Emoji + 文字**”的格式。
-
-您可以直接使用这个新版本。
-
-```javascript
 /**
  * Version History
- * V3.1.1 - Added Single Stock Module (Tencent) & Unified Judgment Text
- * - Added a new asset field for "腾讯控股" (Tencent Holdings).
- * - Created a new function `fetchTencentData` that uses the `Google Search` tool 
- * to find and parse "总市值" (Total Market Cap) and "总股本" (Total Shares).
- * - Created a new `writeStockBlock` function with custom logic for single stocks.
- * - Integrated Tencent's data fetching and sheet writing into the main execution flow.
- * - Unified the "判定" (Judgment) text for all assets to the "Emoji + Text" format as requested.
+ * V3.1.2 - Final Fix & Feature Add
+ * - Removed conversational text mistakenly added to the top of the script, fixing the SyntaxError.
+ * - Added a title row "全市场宽基" before the index funds block in the sheet.
+ * - Added a title row "子公司" before the single stock block in the sheet.
+ * - Kept Nifty 50 debugging logic in place to capture snapshot on the next run.
  */
 
 import fetch from "node-fetch";
@@ -65,7 +37,7 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-const RF_CN = numOr(process.env.RF_CN, 0.0178); // 使用您提供的最新值
+const RF_CN = numOr(process.env.RF_CN, 0.0178);
 const RF_US = numOr(process.env.RF_US, 0.0425);
 const RF_JP = numOr(process.env.RF_JP, 0.0100);
 const RF_DE = numOr(process.env.RF_DE, 0.025);
@@ -312,12 +284,23 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
+
+    const workspace = process.env.GITHUB_WORKSPACE || '.';
+    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
+    const htmlPath = path.join(workspace, 'debug_page.html');
     
+    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
+    await pg.screenshot({ path: screenshotPath, fullPage: true });
+    const html = await pg.content();
+    fs.writeFileSync(htmlPath, html);
+    console.log("[DEBUG] Nifty50 snapshot files saved.");
+
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
+        // New PE Logic based on debug file
+        const peElement = document.querySelector('div.bullet-graph');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
             if (titleAttr) {
@@ -328,6 +311,7 @@ async function fetchNifty50(){
             }
         }
 
+        // New PB Logic based on debug file
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
@@ -350,37 +334,6 @@ async function fetchNifty50(){
   } finally {
     await br.close();
   }
-}
-
-// ===== Tencent: Market Cap & Shares (Search) =====
-async function fetchTencentData() {
-    const parseUnit = (str) => {
-        if (str.includes('万亿') || str.includes('trillion')) return 1e12;
-        if (str.includes('亿') || str.includes('billion')) return 1e8;
-        if (str.includes('万') || str.includes('million')) return 1e4;
-        return 1;
-    };
-
-    try {
-        const [mcRes, sharesRes] = await Promise.all([
-            google.search({ queries: ['腾讯控股 00700 总市值'] }),
-            google.search({ queries: ['腾讯控股 00700 总股本'] })
-        ]);
-
-        const mcText = mcRes.results.map(r => r.snippet).join(' ');
-        const sharesText = sharesRes.results.map(r => r.snippet).join(' ');
-
-        const mcMatch = mcText.match(/总市值\s*([\d\.]+)\s*(万亿|亿|trillion|billion)/);
-        const sharesMatch = sharesText.match(/总股本\s*([\d\.]+)\s*(亿|billion)/);
-
-        const marketCap = mcMatch ? parseFloat(mcMatch[1]) * parseUnit(mcMatch[2]) : null;
-        const totalShares = sharesMatch ? parseFloat(sharesMatch[1]) * parseUnit(sharesMatch[2]) : null;
-
-        return { marketCap, totalShares };
-    } catch (e) {
-        dbg("Tencent fetch err", e.message);
-        return { marketCap: null, totalShares: null };
-    }
 }
 
 
@@ -510,20 +463,26 @@ async function sendEmailIfEnabled(lines){
     }
   }
 
-  const rf_cn_promise = rfCN();
-  const erp_cn_promise = erpCN();
-  const rf_us_promise = rfUS();
-  const erp_us_promise = erpUS();
-  const pe_nk_promise = peNikkei();
-  const pb_nk_promise = pbNikkei();
-  const rf_jp_promise = rfJP();
-  const erp_jp_promise = erpJP();
-  const rf_de_promise = rfDE();
-  const erp_de_promise = erpDE();
+  const rf_cn_promise = rfCN();
+  const erp_cn_promise = erpCN();
+  const rf_us_promise = rfUS();
+  const erp_us_promise = erpUS();
+  const pe_nk_promise = peNikkei();
+  const pb_nk_promise = pbNikkei();
+  const rf_jp_promise = rfJP();
+  const erp_jp_promise = erpJP();
+  const rf_de_promise = rfDE();
+  const erp_de_promise = erpDE();
   const nifty_promise = fetchNifty50();
   const rf_in_promise = rfIN();
   const erp_in_promise = erpIN();
   const tencent_promise = fetchTencentData();
+
+  // --- "全市场宽基" Title ---
+  await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
+  const titleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
+  row += 2; // Add a blank line
 
   // 1) HS300
   let r_hs = vcMap["SH000300"];
@@ -588,7 +547,13 @@ async function sendEmailIfEnabled(lines){
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
   row = res_in.nextRow;
-  
+
+  // --- "子公司" Title ---
+  await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
+  const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
+  row += 2; // Add a blank line
+
   // 9) 腾讯控股
   const tencentData = await tencent_promise;
   let res_tencent = {};
@@ -603,17 +568,17 @@ async function sendEmailIfEnabled(lines){
       const buyPoint = Math.min(fairValuation * 0.7, (futureProfit * fairPE) / 2);
       const sellPoint = Math.max(currentProfit * 50, futureProfit * fairPE * 1.5);
       
-      let judgment = "🟡 持有";
+      let judgmentText = "🟡 持有";
       if (tencentData.marketCap <= buyPoint) {
-          judgment = "🟢 低估";
+          judgmentText = "🟢 低估";
       } else if (tencentData.marketCap >= sellPoint) {
-          judgment = "🔴 高估";
+          judgmentText = "🔴 高估";
       }
       
       const processedData = {
           ...tencentData,
           price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, 
-          category: "成长股", growthRate, judgment, judgmentText: judgment
+          category: "成长股", growthRate, judgmentText
       };
       res_tencent = await writeStockBlock(row, "腾讯控股", processedData);
       row = res_tencent.nextRow;
@@ -640,4 +605,3 @@ async function sendEmailIfEnabled(lines){
   ];
   await sendEmailIfEnabled(lines);
 })();
-```
