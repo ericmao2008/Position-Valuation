@@ -284,7 +284,7 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-
+    
     const workspace = process.env.GITHUB_WORKSPACE || '.';
     const screenshotPath = path.join(workspace, 'debug_screenshot.png');
     const htmlPath = path.join(workspace, 'debug_page.html');
@@ -294,12 +294,12 @@ async function fetchNifty50(){
     const html = await pg.content();
     fs.writeFileSync(htmlPath, html);
     console.log("[DEBUG] Nifty50 snapshot files saved.");
-
+    
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        const peElement = document.querySelector('div.bullet-graph');
+        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
             if (titleAttr) {
