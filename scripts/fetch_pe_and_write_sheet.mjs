@@ -1,11 +1,10 @@
 /**
  * Version History
- * V2.9.7 - Final Model Implementation
- * - Adjusted the DELTA to 1.0% (0.01) as requested for a wider holding range.
- * - Replaced MSCI India with Nifty 50.
- * - Created a new function `fetchNifty50` to scrape PE and PB from trendlyne.com.
- * - Nifty 50 ROE is now calculated as PB/PE, similar to the Nikkei index.
- * - Removed obsolete functions related to MSCI India (rfIN, erpIN).
+ * V2.9.8 - Fix Nifty 50 Scraping Logic
+ * - Rewrote the `fetchNifty50` function with more robust selectors and a better waiting strategy.
+ * - The script now waits for the H1 title to appear before scraping.
+ * - It locates the PB value by searching for an element containing the text "Nifty 50 PB", 
+ * which is more resilient to structural changes on trendlyne.com.
  */
 
 import fetch from "node-fetch";
@@ -37,11 +36,11 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.01); // Adjusted to 1.0%
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-const RF_CN = numOr(process.env.RF_CN, 0.023); // 兜底-中国
-const RF_US = numOr(process.env.RF_US, 0.0425); // 兜底-美国
-const RF_JP = numOr(process.env.RF_JP, 0.0100); // 兜底-日本
-const RF_DE = numOr(process.env.RF_DE, 0.025); // 兜底-德国
-const RF_IN = numOr(process.env.RF_IN, 0.07);  // 兜底-印度
+const RF_CN = numOr(process.env.RF_CN, 0.023);
+const RF_US = numOr(process.env.RF_US, 0.0425);
+const RF_JP = numOr(process.env.RF_JP, 0.0100);
+const RF_DE = numOr(process.env.RF_DE, 0.025);
+const RF_IN = numOr(process.env.RF_IN, 0.07);
 
 const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE_CN??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim(); return s?Number(s):null; })();
@@ -282,18 +281,29 @@ async function fetchNifty50(){
   const pg  = await ctx.newPage();
   const url = "https://trendlyne.com/equity/PE/NIFTY/1887/nifty-50-price-to-earning-ratios/";
   await pg.goto(url, { waitUntil: 'domcontentloaded' });
-  await pg.waitForSelector(".p-0", { timeout: 15000 }).catch(()=>{});
+  await pg.waitForSelector('h1', { timeout: 15000 }).catch(()=>{});
   await pg.waitForTimeout(1000);
-  const values = await pg.evaluate(()=>{
-    const mainContainer = document.querySelector('.main-content .container-fluid');
-    if (!mainContainer) return { pe: null, pb: null };
 
-    const peText = mainContainer.querySelector('h1 + div > span:nth-child(1)');
-    const pbText = mainContainer.querySelector('div:nth-child(3) > div:nth-child(1) a.btn');
-    
-    const pe = peText ? parseFloat(peText.textContent.trim()) : null;
-    const pb = pbText ? parseFloat(pbText.textContent.trim()) : null;
+  const values = await pg.evaluate(() => {
+    let pe = null;
+    let pb = null;
 
+    const peHeading = document.querySelector('h1');
+    if (peHeading && peHeading.nextElementSibling) {
+        const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
+        if (peSpan) {
+            pe = parseFloat(peSpan.textContent.trim());
+        }
+    }
+
+    const allLinks = Array.from(document.querySelectorAll('a.btn'));
+    const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
+    if (pbLink) {
+        const pbMatch = pbLink.textContent.trim().match(/(\d+\.?\d*)/);
+        if (pbMatch) {
+            pb = parseFloat(pbMatch[1]);
+        }
+    }
     return { pe, pb };
   });
   await br.close();
