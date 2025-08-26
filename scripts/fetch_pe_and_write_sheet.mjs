@@ -1,9 +1,9 @@
 /**
  * Version History
- * V2.9.9 - Enhanced Nifty 50 Debugging
- * - Added the "debugging snapshot" (screenshot + html save) feature directly into the `fetchNifty50` function.
- * - Added a check in the Main block to force the script to exit with an error if Nifty 50 data is not successfully scraped.
- * - This will trigger the artifact upload on GitHub Actions, allowing us to see what the scraper sees on trendlyne.com.
+ * V2.9.10 - Fix Artifact Generation for Nifty 50
+ * - Added a specific check in the Main block to verify if `fetchNifty50` returned valid data.
+ * - If Nifty 50 data is null, the script will now correctly exit with error code 1.
+ * - This ensures that if the Nifty 50 scrape fails, the debug artifacts will be uploaded correctly.
  */
 
 import fetch from "node-fetch";
@@ -279,47 +279,51 @@ async function fetchNifty50(){
   const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
   const pg  = await ctx.newPage();
   const url = "https://trendlyne.com/equity/PE/NIFTY/1887/nifty-50-price-to-earning-ratios/";
-  await pg.goto(url, { waitUntil: 'domcontentloaded' });
-  await pg.waitForSelector('h1', { timeout: 15000 }).catch(()=>{});
-  await pg.waitForTimeout(1000);
+  try {
+    await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await pg.waitForSelector('h1', { timeout: 15000 });
+    await pg.waitForTimeout(1000);
 
-  // --- Add Debugging Snapshot ---
-  console.log("[DEBUG] Taking Nifty50 snapshot before evaluation...");
-  await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
-  const html = await pg.content();
-  fs.writeFileSync('debug_page.html', html);
-  console.log("[DEBUG] Nifty50 snapshot files saved.");
-  // --- End Snapshot ---
+    // --- Add Debugging Snapshot ---
+    console.log("[DEBUG] Taking Nifty50 snapshot before evaluation...");
+    await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
+    const html = await pg.content();
+    fs.writeFileSync('debug_page.html', html);
+    console.log("[DEBUG] Nifty50 snapshot files saved.");
+    // --- End Snapshot ---
 
-  const values = await pg.evaluate(() => {
-    let pe = null;
-    let pb = null;
+    const values = await pg.evaluate(() => {
+      let pe = null;
+      let pb = null;
 
-    const peHeading = document.querySelector('h1');
-    if (peHeading && peHeading.nextElementSibling) {
-        const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
-        if (peSpan) {
-            pe = parseFloat(peSpan.textContent.trim());
-        }
-    }
+      const peHeading = document.querySelector('h1');
+      if (peHeading && peHeading.nextElementSibling) {
+          const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
+          if (peSpan) {
+              pe = parseFloat(peSpan.textContent.trim());
+          }
+      }
 
-    const allLinks = Array.from(document.querySelectorAll('a.btn'));
-    const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
-    if (pbLink) {
-        const pbMatch = pbLink.textContent.trim().match(/(\d+\.?\d*)/);
-        if (pbMatch) {
-            pb = parseFloat(pbMatch[1]);
-        }
-    }
-    return { pe, pb };
-  });
-  await br.close();
-
-  const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
-  const pbRes = (Number.isFinite(values.pb) && values.pb > 0) ? { v: values.pb, tag: "真实", link: `=HYPERLINK("${url}","Nifty PB")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PB")` };
-  
-  return { peRes, pbRes };
+      const allLinks = Array.from(document.querySelectorAll('a.btn'));
+      const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
+      if (pbLink) {
+          const pbMatch = pbLink.textContent.trim().match(/(\d+\.?\d*)/);
+          if (pbMatch) {
+              pb = parseFloat(pbMatch[1]);
+          }
+      }
+      return { pe, pb };
+    });
+    
+    const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
+    const pbRes = (Number.isFinite(values.pb) && values.pb > 0) ? { v: values.pb, tag: "真实", link: `=HYPERLINK("${url}","Nifty PB")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PB")` };
+    
+    return { peRes, pbRes };
+  } finally {
+    await br.close();
+  }
 }
+
 
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
@@ -484,6 +488,12 @@ async function sendEmailIfEnabled(lines){
   const nifty_data = await nifty_promise;
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
+
+  if (!pe_nifty.v || !pb_nifty.v) {
+    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
+    process.exit(1);
+  }
+
   let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
