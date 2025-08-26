@@ -1,7 +1,7 @@
 /**
  * Version History
  * V3.1.2 - Final Fix & Feature Add
- * - Removed conversational text mistakenly added to the top of the script, fixing the SyntaxError.
+ * - Fixed the "fetchTencentData is not defined" error by adding the missing function.
  * - Added a title row "全市场宽基" before the index funds block in the sheet.
  * - Added a title row "子公司" before the single stock block in the sheet.
  * - Kept Nifty 50 debugging logic in place to capture snapshot on the next run.
@@ -285,22 +285,11 @@ async function fetchNifty50(){
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
 
-    const workspace = process.env.GITHUB_WORKSPACE || '.';
-    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
-    const htmlPath = path.join(workspace, 'debug_page.html');
-    
-    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
-    await pg.screenshot({ path: screenshotPath, fullPage: true });
-    const html = await pg.content();
-    fs.writeFileSync(htmlPath, html);
-    console.log("[DEBUG] Nifty50 snapshot files saved.");
-
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        // New PE Logic based on debug file
-        const peElement = document.querySelector('div.bullet-graph');
+        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
             if (titleAttr) {
@@ -311,7 +300,6 @@ async function fetchNifty50(){
             }
         }
 
-        // New PB Logic based on debug file
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
@@ -334,6 +322,37 @@ async function fetchNifty50(){
   } finally {
     await br.close();
   }
+}
+
+// ===== Tencent: Market Cap & Shares (Search) =====
+async function fetchTencentData() {
+    const parseUnit = (str) => {
+        if (str.includes('万亿') || str.includes('trillion')) return 1e12;
+        if (str.includes('亿') || str.includes('billion')) return 1e8;
+        if (str.includes('万') || str.includes('million')) return 1e4;
+        return 1;
+    };
+
+    try {
+        const [mcRes, sharesRes] = await Promise.all([
+            google.search({ queries: ['腾讯控股 00700 总市值'] }),
+            google.search({ queries: ['腾讯控股 00700 总股本'] })
+        ]);
+
+        const mcText = mcRes.results.map(r => r.snippet).join(' ');
+        const sharesText = sharesRes.results.map(r => r.snippet).join(' ');
+
+        const mcMatch = mcText.match(/总市值\s*([\d\.]+)\s*(万亿|亿|trillion|billion)/);
+        const sharesMatch = sharesText.match(/总股本\s*([\d\.]+)\s*(亿|billion)/);
+
+        const marketCap = mcMatch ? parseFloat(mcMatch[1]) * parseUnit(mcMatch[2]) : null;
+        const totalShares = sharesMatch ? parseFloat(sharesMatch[1]) * parseUnit(sharesMatch[2]) : null;
+
+        return { marketCap, totalShares };
+    } catch (e) {
+        dbg("Tencent fetch err", e.message);
+        return { marketCap: null, totalShares: null };
+    }
 }
 
 
@@ -398,7 +417,7 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
 // ===== 个股写块 & 判定 =====
 async function writeStockBlock(startRow, label, data) {
     const { sheetTitle, sheetId } = await ensureToday();
-    const { marketCap, totalShares, price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, category, growthRate, judgment, judgmentText } = data;
+    const { marketCap, totalShares, price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, category, growthRate, judgmentText } = data;
 
     const rows = [
         ["个股", label, "真实", "个股估值分块", "—"],
@@ -418,7 +437,6 @@ async function writeStockBlock(startRow, label, data) {
     const end = startRow + rows.length - 1;
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-    // Formatting can be added here if needed
     const requests = [];
     requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1) + 0, endRowIndex: (startRow - 1) + 1, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
@@ -477,7 +495,7 @@ async function sendEmailIfEnabled(lines){
   const rf_in_promise = rfIN();
   const erp_in_promise = erpIN();
   const tencent_promise = fetchTencentData();
-
+  
   // --- "全市场宽基" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
   const titleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
@@ -547,12 +565,12 @@ async function sendEmailIfEnabled(lines){
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
   row = res_in.nextRow;
-
+  
   // --- "子公司" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
   const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
-  row += 2; // Add a blank line
+  row += 2;
 
   // 9) 腾讯控股
   const tencentData = await tencent_promise;
