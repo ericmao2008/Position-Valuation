@@ -1,10 +1,9 @@
 /**
  * Version History
- * V3.1.2 - Final Fix & Feature Add
- * - Fixed the "fetchTencentData is not defined" error by adding the missing function.
- * - Added a title row "全市场宽基" before the index funds block in the sheet.
- * - Added a title row "子公司" before the single stock block in the sheet.
- * - Kept Nifty 50 debugging logic in place to capture snapshot on the next run.
+ * V3.1.3 - Final Debugging Attempt for Nifty & Fix for Tencent
+ * - Corrected the "google.search is not a function" error in `fetchTencentData`.
+ * - Re-enabled and fortified the debugging snapshot logic within `fetchNifty50` and the main block.
+ * - If the Nifty 50 scrape fails, this version will reliably save the debug artifacts for final analysis.
  */
 
 import fetch from "node-fetch";
@@ -285,6 +284,16 @@ async function fetchNifty50(){
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
 
+    const workspace = process.env.GITHUB_WORKSPACE || '.';
+    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
+    const htmlPath = path.join(workspace, 'debug_page.html');
+    
+    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
+    await pg.screenshot({ path: screenshotPath, fullPage: true });
+    const html = await pg.content();
+    fs.writeFileSync(htmlPath, html);
+    console.log("[DEBUG] Nifty50 snapshot files saved.");
+    
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
@@ -335,12 +344,12 @@ async function fetchTencentData() {
 
     try {
         const [mcRes, sharesRes] = await Promise.all([
-            google.search({ queries: ['腾讯控股 00700 总市值'] }),
-            google.search({ queries: ['腾讯控股 00700 总股本'] })
+            google_search.search({ queries: ['腾讯控股 00700 总市值'] }),
+            google_search.search({ queries: ['腾讯控股 00700 总股本'] })
         ]);
 
-        const mcText = mcRes.results.map(r => r.snippet).join(' ');
-        const sharesText = sharesRes.results.map(r => r.snippet).join(' ');
+        const mcText = mcRes[0].results.map(r => r.snippet).join(' ');
+        const sharesText = sharesRes[0].results.map(r => r.snippet).join(' ');
 
         const mcMatch = mcText.match(/总市值\s*([\d\.]+)\s*(万亿|亿|trillion|billion)/);
         const sharesMatch = sharesText.match(/总股本\s*([\d\.]+)\s*(亿|billion)/);
@@ -354,7 +363,6 @@ async function fetchTencentData() {
         return { marketCap: null, totalShares: null };
     }
 }
-
 
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
@@ -476,7 +484,7 @@ async function sendEmailIfEnabled(lines){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
     
     if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
+      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting.");
       process.exit(1);
     }
   }
@@ -560,12 +568,18 @@ async function sendEmailIfEnabled(lines){
   const nifty_data = await nifty_promise;
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
+  
+  if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
+    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
+    process.exit(1);
+  }
+
   let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
   row = res_in.nextRow;
-  
+
   // --- "子公司" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
   const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
