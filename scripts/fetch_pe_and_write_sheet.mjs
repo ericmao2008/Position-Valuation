@@ -1,11 +1,9 @@
 /**
  * Version History
- * V4.5.0 - Final Version: Formula-Based Logic with IMPORTXML Fallback
- * - Tencent's price is fetched using the reliable GOOGLEFINANCE function.
- * - Kweichow Moutai's price now uses the user-provided IMPORTXML formula to bypass GOOGLEFINANCE limitations,
-     making all calculations happen within the sheet.
- * - Both stock blocks are now fully self-contained within Google Sheets, maximizing reliability.
- * - Email summary remains generic as all calculations are offloaded to the sheet.
+ * V4.5.1 - Corrected Moutai's IMPORTXML formula based on user feedback.
+ * - The XPath for scraping Moutai's price has been updated to the user-provided specific path.
+ * - Tencent's logic remains formula-based using GOOGLEFINANCE.
+ * - All other logic is unchanged.
  */
 
 import fetch from "node-fetch";
