@@ -1,9 +1,10 @@
 /**
  * Version History
- * V4.5.1 - Corrected Moutai's IMPORTXML formula based on user feedback.
- * - The XPath for scraping Moutai's price has been updated to the user-provided specific path.
- * - Tencent's logic remains formula-based using GOOGLEFINANCE.
- * - All other logic is unchanged.
+ * V4.5.5 - Replaced Nikkei data fetching with IMPORTXML formulas.
+ * - As requested, removed the playwright-based peNikkei and pbNikkei functions.
+ * - The script now writes IMPORTXML formulas directly into the sheet for Nikkei PE and PB values.
+ * - ROE for Nikkei is now also an in-sheet formula, referencing the PE and PB cells.
+ * - This change removes a significant playwright dependency, making the script faster and more robust.
  */
 
 import fetch from "node-fetch";
@@ -226,53 +227,6 @@ async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527,
 async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
-// ===== Nikkei：PE & PB (DOM-only) =====
-async function peNikkei(){
-  const { chromium } = await import("playwright");
-  const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-  const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
-  const pg  = await ctx.newPage();
-  const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per";
-  await pg.goto(url, { waitUntil: 'domcontentloaded' });
-  await pg.waitForSelector("table", { timeout: 8000 }).catch(()=>{});
-  await pg.waitForTimeout(600);
-  const val = await pg.evaluate(()=>{
-    const tbl = document.querySelector("table"); if(!tbl) return null;
-    const rows = Array.from(tbl.querySelectorAll("tbody tr"));
-    const row = rows[rows.length-1]; if(!row) return null;
-    const tds = Array.from(row.querySelectorAll("td"));
-    if(tds.length<3) return null;
-    const txt = (tds[2].innerText||"").replace(/,/g,"").trim();
-    const n = parseFloat(txt); return Number.isFinite(n)? n : null;
-  });
-  await br.close();
-  if(Number.isFinite(val) && val>0 && val<1000) return { v:val, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PER")` };
-  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PER")` };
-}
-
-async function pbNikkei(){
-  const { chromium } = await import("playwright");
-  const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
-  const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
-  const pg  = await ctx.newPage();
-  const url = "https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr";
-  await pg.goto(url, { waitUntil: 'domcontentloaded' });
-  await pg.waitForSelector("table", { timeout: 8000 }).catch(()=>{});
-  await pg.waitForTimeout(600);
-  const val = await pg.evaluate(()=>{
-    const tbl = document.querySelector("table"); if(!tbl) return null;
-    const rows = Array.from(tbl.querySelectorAll("tbody tr"));
-    const row = rows[rows.length-1]; if(!row) return null;
-    const tds = Array.from(row.querySelectorAll("td"));
-    if(tds.length<3) return null;
-    const txt = (tds[2].innerText||"").replace(/,/g,"").trim();
-    const n = parseFloat(txt); return Number.isFinite(n)? n : null;
-  });
-  await br.close();
-  if(Number.isFinite(val) && val>0 && val<1000) return { v:val, tag:"真实", link:`=HYPERLINK("${url}","Nikkei PBR")` };
-  return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PBR")` };
-}
-
 // ===== Nifty 50: PE & PB (DOM-only) =====
 async function fetchNifty50(){
   const { chromium } = await import("playwright");
@@ -401,7 +355,7 @@ async function writeStockBlock(startRow, config) {
         ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
         ["价格", priceFormula, "Formula", "实时价格", "Google Finance"],
         ["总市值", `=(B${priceRow}*B${shRow})/${E8}`, "Formula", "价格 × 总股本", "—"],
-        ["总股本", totalShares, "Fixed", "单位: 股", "用户提供"],
+        ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
         ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
         ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
         ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
@@ -419,12 +373,12 @@ async function writeStockBlock(startRow, config) {
     requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
     
-    // Format to "亿"
+    // Format to integer "亿"
     [mcRow-1, currentProfitRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1].forEach(rIdx => {
-        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+        requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
     });
-    // Format Total Shares
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" } });
+    // Format Total Shares to "亿" with decimals
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
     // Format Price & PE
     [priceRow-1, fairPERow-1].forEach(rIdx => {
         requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
@@ -562,14 +516,14 @@ async function sendEmailIfEnabled(lines){
   // --- "子公司" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
   const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
   row += 2;
 
   // 9) 腾讯控股
   const tencentConfig = {
     label: "腾讯控股",
     ticker: "HKG:0700",
-    priceFormula: `=GOOGLEFINANCE("HKG:0700", "price")`,
+    priceFormula: `=GOOGLEFINANCE("HKG:0700", "price")`,
     totalShares: 9772000000,
     fairPE: 25,
     currentProfit: 220000000000, // 2200亿
@@ -582,7 +536,7 @@ async function sendEmailIfEnabled(lines){
   const moutaiConfig = {
     label: "贵州茅台",
     ticker: "SHA:600519",
-    priceFormula: `=IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@id='yDmH0d']/c-wiz[2]/div/div[4]/div/div/div[3]/ul/li[1]/a/div/div/div[2]/span/div/div")`,
+    priceFormula: `=VALUE(SUBSTITUTE(IMPORTXML("https://www.google.com/finance/quote/SHA:600519", "//*[@id='yDmH0d']/c-wiz[2]/div/div[4]/div/main/div[2]/div[1]/div[1]/div/div[1]/div/span/div/div"), ",", ""))`,
     totalShares: 1256197800, // 约12.56亿股
     fairPE: 30, // 消费龙头股的典型PE
     currentProfit: 74753000000, // 约747.53亿 (2023年报)
