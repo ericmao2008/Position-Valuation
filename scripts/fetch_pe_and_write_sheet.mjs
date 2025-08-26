@@ -1,17 +1,17 @@
 /**
  * Version History
- * V2.9.7 - Final Model Implementation
- * - Replaced MSCI India with Nifty 50.
- * - Created a new function `fetchNifty50` to scrape PE and PB from trendlyne.com.
- * - Nifty 50 ROE is now calculated as PB/PE, similar to the Nikkei index.
- * - Adjusted DELTA to 1.0% (0.01) as requested for a wider holding range.
- * - Removed obsolete functions related to MSCI India.
+ * V2.9.16 - Final Nifty 50 Fix based on HTML Analysis
+ * - Rewrote `fetchNifty50`'s scraping logic based on the user-provided debug HTML files.
+ * - PE is now extracted from a div's title attribute using regex.
+ * - PB is now extracted by finding the correct table row and then the specific value cell.
+ * - Removed debugging code (snapshots, forced exits) as the issue should now be resolved.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import fs from "fs";
+import path from "path";
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -34,7 +34,7 @@ const VC_TARGETS = {
 
 // ===== Policy / Defaults =====
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
-const DELTA         = numOr(process.env.DELTA,      0.01); // Adjusted to 1.0%
+const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
 const RF_CN = numOr(process.env.RF_CN, 0.023);
@@ -284,7 +284,7 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-
+    
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
