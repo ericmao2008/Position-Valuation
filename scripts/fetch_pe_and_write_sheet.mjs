@@ -282,34 +282,34 @@ async function fetchNifty50(){
   const pg  = await ctx.newPage();
   const url = "https://trendlyne.com/equity/PE/NIFTY/1887/nifty-50-price-to-earning-ratios/";
   try {
-    await pg.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
+    await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
 
     const workspace = process.env.GITHUB_WORKSPACE || '.';
     const screenshotPath = path.join(workspace, 'debug_screenshot.png');
     const htmlPath = path.join(workspace, 'debug_page.html');
-
+    
     console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
     await pg.screenshot({ path: screenshotPath, fullPage: true });
     const html = await pg.content();
     fs.writeFileSync(htmlPath, html);
     console.log("[DEBUG] Nifty50 snapshot files saved.");
-    
+
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        // New PE Logic based on debug file
         const peElement = document.querySelector('div.bullet-graph');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
-            const peMatch = titleAttr.match(/Current PE is ([\d\.]+)/);
-            if (peMatch && peMatch[1]) {
-                pe = parseFloat(peMatch[1]);
+            if (titleAttr) {
+                const peMatch = titleAttr.match(/Current PE is ([\d\.]+)/);
+                if (peMatch && peMatch[1]) {
+                    pe = parseFloat(peMatch[1]);
+                }
             }
         }
 
-        // New PB Logic based on debug file
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
