@@ -1,112 +1,11 @@
 /**
  * Version History
- * V2.9.6 - Nikkei ROE Calculation
- * - Implemented the proposed logic to calculate Nikkei ROE from official PE and PB values.
- * - Added a new `pbNikkei` function to scrape the PBR value from indexes.nikkei.co.jp.
- * - The Main block now fetches both PE and PB for Nikkei and calculates ROE = PB / PE.
- * - Removed the manual `ROE_JP` environment variable override for Nikkei.
- *
- * V2.9.5 - Feature Expansion: Added NDX, DAX, India Indices
- * - Added Nasdaq 100, Germany DAX, and MSCI India to the VC_TARGETS.
- * - Created new functions (rfDE, rfIN, erpDE, erpIN) to fetch bond yields and ERPs for Germany and India.
- * - Updated the Main block to process, write, and report on all 8 indices.
- * - Refined `writeBlock` to handle labels for different countries.
- * - Added new PE_OVERRIDE environment variables for the new indices.
- *
- * V2.9.4 - UI Polish
- * - Modified the '判定' (Judgment) field in `writeBlock` to only show the emoji (🟢, 🔴, 🟡) 
- * and remove the descriptive text, as requested. This affects both the sheet and email summary.
- *
- * V2.9.3 - Feature Removal
- * - Removed the "新经济" (New Economy) index from all processing sections as requested.
- * - Cleaned up related constants and logic in the Main function.
- * * V2.9.2 - Final Formatting & Feature Polish
- * - Fixed off-by-one error in format application logic within `writeBlock`.
- * - ROE rows are now correctly formatted as percentages (0.00%).
- * - ROE Factor row is now correctly formatted as a decimal (0.00).
- * - Added the "新经济" index to the main processing loop to ensure it's written to the sheet.
- * - Enhanced email summary to include ROE values for a more complete overview.
- * * V2.9.1 - The Great Refactor (Complete File)
- * - Final complete version by Gemini, adhering to the principle of providing full files only.
- * - Rewrote the core scraping logic in `fetchVCMapDOM` to adapt to the new div-based layout on danjuanfunds.com.
- * - Logic now locates data by finding specific class name prefixes (e.g., "pe___", "roe___"), which is more robust.
- * - Full logic for all 5 target indices is present in the Main function.
- *
- * V2.7.4
- *  - 统一改为 “表格解析” 的 Value Center 抓取（仅 HS300/SP500/CSIH30533/HSTECH）：
- *      * 通过 <a href="/dj-valuation-table-detail/<CODE>"> 锁定对应 <tr>
- *      * 第 2 列取 PE（小数）；第 7 列取 ROE（百分比 → 小数）
- *      * HTTP 优先，如需再 Playwright 打开同页读取 page.content() 再解析
- *  - 口径：HS300/CSIH30533/HSTECH → r_f=中国10Y，ERP*=China；SP500 → r_f=US10Y，ERP*=US
- *  - Nikkei 仍用官方档案页 PER；ROE 暂用 ROE_JP（小数）可覆写
- *  - 判定：基于 P/E 与 [买点, 卖点] 区间；邮件正文包含判定；DEBUG 保留
- *
- * V2.7.3
- *  - 修复：重复 import nodemailer
- *
- * V2.7.2
- *  - 修复 peNikkei 未定义；Value Center-only（除 Nikkei）；HSTECH 与中概口径一致
- *
- * V2.7.1
- *  - 修复 roeFromDanjuan 未定义；保留 Value Center 优先、邮件判定、恒生科技分块
- *
- * V2.7.0-test
- *  - 新增恒生科技（HSTECH）；Value Center 优先抓取；邮件正文加入判定
- *
- * V2.6.11
- *  - 修复：P/E 抓取函数占位导致 undefined；恢复并加固四个 pe 函数
- *
- * V2.6.10
- *  - 修复：CSIH30533 的 ROE(TTM) 丢失（点击 ROE tab + JSON 优先 + 3%~40% 过滤）
- *  - 邮件：支持 MAIL_FROM_EMAIL/MAIL_FROM_NAME；text+html；verify + DEBUG
- *
- * V2.6.9
- *  - 判定：基于 P/E 与 [买点, 卖点] 区间；内建邮件 DEBUG（verify/send/FORCE_EMAIL）
- *
- * V2.6.8
- *  - 修复：中概 ROE 偶发抓成 30%（更严格匹配与范围过滤）
- *
- * V2.6.7
- *  - 去除“中枢（对应P/E上限）”；仅保留买点/卖点/合理区间；公式写入说明
- *
- * V2.6.6
- *  - 指数行高亮；去表头行；ROE 百分比、因子小数；版本日志保留
- *
- * V2.6.5
- *  - 清空当日 Sheet（值+样式+边框）；统一 totalRows；每块后留 1 空行
- *
- * V2.6.4
- *  - 修复写入范围与实际行数不一致
- *
- * V2.6.3
- *  - 方案B：加入“合理PE（ROE因子）”；在说明中写明公式
- *
- * V2.6.2
- *  - 去除多余 P/E 行；每块加粗浅灰与外框；曾并行显示“原始阈值/ROE因子阈值”
- *
- * V2.6.1 (hotfix)
- *  - 百分比格式修正；ROE(TTM) 抓取增强（Playwright/HTTP）
- *
- * V2.6
- *  - 引入 ROE 因子：PE_limit = 1/(r_f+ERP*) × (ROE/ROE_BASE)
- *
- * V2.5
- *  - CSIH30533 切中国口径：r_f=中国10Y，ERP*=China
- *
- * V2.4
- *  - 新增 CSIH30533 分块；多路兜底
- *
- * V2.3
- *  - δ → P/E 空间三阈值
- *
- * V2.2
- *  - Nikkei 修复；空串不写 0
- *
- * V2.1
- *  - 新增 Nikkei 225
- *
- * V2.0
- *  - HS300 + SPX 基础版
+ * V2.9.7 - Final Model Implementation
+ * - Adjusted the DELTA to 1.0% (0.01) as requested for a wider holding range.
+ * - Replaced MSCI India with Nifty 50.
+ * - Created a new function `fetchNifty50` to scrape PE and PB from trendlyne.com.
+ * - Nifty 50 ROE is now calculated as PB/PE, similar to the Nikkei index.
+ * - Removed obsolete functions related to MSCI India (rfIN, erpIN).
  */
 
 import fetch from "node-fetch";
@@ -129,29 +28,27 @@ const VC_TARGETS = {
   SP500:    { name: "标普500", code: "SP500", country: "US" },
   CSIH30533:{ name: "中概互联50", code: "CSIH30533", country: "CN" },
   HSTECH:   { name: "恒生科技", code: "HKHSTECH", country: "CN" },
-  NDX:      { name: "纳指100", code: "NDX", country: "US" },
-  GDAXI:    { name: "德国DAX", code: "GDAXI", country: "DE" },
-  "935600": { name: "MSCI印度", code: "935600", country: "IN" },
+  NDX:      { name: "纳指100", code: "NDX", country: "US" },
+  GDAXI:    { name: "德国DAX", code: "GDAXI", country: "DE" },
 };
 
 // ===== Policy / Defaults =====
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
-const DELTA         = numOr(process.env.DELTA,      0.005);
+const DELTA         = numOr(process.env.DELTA,      0.01); // Adjusted to 1.0%
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
 const RF_CN = numOr(process.env.RF_CN, 0.023); // 兜底-中国
 const RF_US = numOr(process.env.RF_US, 0.0425); // 兜底-美国
 const RF_JP = numOr(process.env.RF_JP, 0.0100); // 兜底-日本
 const RF_DE = numOr(process.env.RF_DE, 0.025); // 兜底-德国
-const RF_IN = numOr(process.env.RF_IN, 0.07);  // 兜底-印度
+const RF_IN = numOr(process.env.RF_IN, 0.07);  // 兜底-印度
 
 const PE_OVERRIDE_CN      = (()=>{ const s=(process.env.PE_OVERRIDE_CN??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_SPX     = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_CXIN    = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim(); return s?Number(s):null; })();
 const PE_OVERRIDE_HSTECH  = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_NDX     = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_DAX     = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_IN      = (()=>{ const s=(process.env.PE_OVERRIDE_IN??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_NDX     = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_DAX     = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
 
 // ===== Sheets =====
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -212,39 +109,39 @@ async function fetchVCMapDOM(){
   await pg.waitForTimeout(1000);
 
   const recs = await pg.evaluate((targets)=>{
-    const out = {};
-    const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
+    const out = {};
+    const toNum = s => { const x=parseFloat(String(s||"").replace(/,/g,"").trim()); return Number.isFinite(x)?x:null; };
     const pct2d = s => { const m=String(s||"").match(/(-?\d+(?:\.\d+)?)\s*%/); if(!m) return null; const v=parseFloat(m[1])/100; return v };
 
-    const rows = Array.from(document.querySelectorAll('.container .row'));
-    const nameDivs = Array.from(document.querySelectorAll('.container .out-row .name'));
+    const rows = Array.from(document.querySelectorAll('.container .row'));
+    const nameDivs = Array.from(document.querySelectorAll('.container .out-row .name'));
 
-    if (rows.length === 0 || nameDivs.length === 0 || rows.length !== nameDivs.length) {
-        return { error: 'Could not find matching data rows and name divs.' };
-    }
+    if (rows.length === 0 || nameDivs.length === 0 || rows.length !== nameDivs.length) {
+        return { error: 'Could not find matching data rows and name divs.' };
+    }
 
-    for (const [code, target] of Object.entries(targets)) {
-        let targetIndex = -1;
-        for (let i = 0; i < nameDivs.length; i++) {
-            const nameDivText = nameDivs[i].textContent || '';
-            if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) {
-                targetIndex = i;
-                break;
-            }
-        }
-        
-        if (targetIndex !== -1) {
-            const dataRow = rows[targetIndex];
-            if (dataRow) {
-                const peEl = dataRow.querySelector('.pe');
-                const roeEl = dataRow.querySelector('.roe');
-                const pe = toNum(peEl ? peEl.textContent : null);
-                const roe = pct2d(roeEl ? roeEl.textContent : null);
-                if(pe && pe > 0) out[code] = { pe, roe };
-            }
-        }
-    }
-    return out;
+    for (const [code, target] of Object.entries(targets)) {
+        let targetIndex = -1;
+        for (let i = 0; i < nameDivs.length; i++) {
+            const nameDivText = nameDivs[i].textContent || '';
+            if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) {
+                targetIndex = i;
+                break;
+            }
+        }
+        
+        if (targetIndex !== -1) {
+            const dataRow = rows[targetIndex];
+            if (dataRow) {
+                const peEl = dataRow.querySelector('.pe');
+                const roeEl = dataRow.querySelector('.roe');
+                const pe = toNum(peEl ? peEl.textContent : null);
+                const roe = pct2d(roeEl ? roeEl.textContent : null);
+                if(pe && pe > 0) out[code] = { pe, roe };
+            }
+        }
+    }
+    return out;
   }, VC_TARGETS);
 
   await br.close();
@@ -377,6 +274,37 @@ async function pbNikkei(){
   return { v:"", tag:"兜底", link:`=HYPERLINK("${url}","Nikkei PBR")` };
 }
 
+// ===== Nifty 50: PE & PB (DOM-only) =====
+async function fetchNifty50(){
+  const { chromium } = await import("playwright");
+  const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
+  const ctx = await br.newContext({ userAgent: UA, locale: 'en-US', timezoneId: TZ });
+  const pg  = await ctx.newPage();
+  const url = "https://trendlyne.com/equity/PE/NIFTY/1887/nifty-50-price-to-earning-ratios/";
+  await pg.goto(url, { waitUntil: 'domcontentloaded' });
+  await pg.waitForSelector(".p-0", { timeout: 15000 }).catch(()=>{});
+  await pg.waitForTimeout(1000);
+  const values = await pg.evaluate(()=>{
+    const mainContainer = document.querySelector('.main-content .container-fluid');
+    if (!mainContainer) return { pe: null, pb: null };
+
+    const peText = mainContainer.querySelector('h1 + div > span:nth-child(1)');
+    const pbText = mainContainer.querySelector('div:nth-child(3) > div:nth-child(1) a.btn');
+    
+    const pe = peText ? parseFloat(peText.textContent.trim()) : null;
+    const pb = pbText ? parseFloat(pbText.textContent.trim()) : null;
+
+    return { pe, pb };
+  });
+  await br.close();
+
+  const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
+  const pbRes = (Number.isFinite(values.pb) && values.pb > 0) ? { v: values.pb, tag: "真实", link: `=HYPERLINK("${url}","Nifty PB")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PB")` };
+  
+  return { peRes, pbRes };
+}
+
+
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
@@ -395,9 +323,9 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
     else if (pe >= peSell) status="🔴";
     else status="🟡";
   }
-  const rfLabel = `${country} 10Y`;
+  const rfLabel = `${country} 10Y`;
   const rows = [
-    ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
+    ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
     ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", rfLabel, rfRes?.link || "—"],
@@ -461,25 +389,26 @@ async function sendEmailIfEnabled(lines){
   let vcMap = {};
   if (USE_PW) {
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
-    
-    if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
-      process.exit(1);
-    }
+    
+    if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
+      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
+      process.exit(1);
+    }
   }
 
-  const rf_cn_promise = rfCN();
-  const erp_cn_promise = erpCN();
-  const rf_us_promise = rfUS();
-  const erp_us_promise = erpUS();
-  const pe_nk_promise = peNikkei();
-  const pb_nk_promise = pbNikkei();
-  const rf_jp_promise = rfJP();
-  const erp_jp_promise = erpJP();
-  const rf_de_promise = rfDE();
-  const erp_de_promise = erpDE();
-  const rf_in_promise = rfIN();
-  const erp_in_promise = erpIN();
+  const rf_cn_promise = rfCN();
+  const erp_cn_promise = erpCN();
+  const rf_us_promise = rfUS();
+  const erp_us_promise = erpUS();
+  const pe_nk_promise = peNikkei();
+  const pb_nk_promise = pbNikkei();
+  const rf_jp_promise = rfJP();
+  const erp_jp_promise = erpJP();
+  const rf_de_promise = rfDE();
+  const erp_de_promise = erpDE();
+  const nifty_promise = fetchNifty50();
+  const rf_in_promise = rfIN();
+  const erp_in_promise = erpIN();
 
   // 1) HS300
   let r_hs = vcMap["SH000300"];
@@ -492,11 +421,11 @@ async function sendEmailIfEnabled(lines){
   let r_sp = vcMap["SP500"];
   let pe_spx = r_sp?.pe ? { v: r_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
   let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_us = await erp_us_promise;
+  const erp_us = await erp_us_promise;
   let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
   row = res_sp.nextRow;
-  
-  // 3) 纳指100
+  
+  // 3) 纳指100
   let r_ndx = vcMap["NDX"];
   let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
   let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
@@ -504,11 +433,11 @@ async function sendEmailIfEnabled(lines){
   row = res_ndx.nextRow;
 
   // 4) Nikkei
-  const pe_nk = await pe_nk_promise;
-  const pb_nk = await pb_nk_promise;
-  let roe_nk = { v: null, tag: "计算值", link: pe_nk.link };
-  if (pe_nk && pe_nk.v && pb_nk && pb_nk.v) { roe_nk.v = pb_nk.v / pe_nk.v; }
-  const erp_jp = await erp_jp_promise;
+  const pe_nk = await pe_nk_promise;
+  const pb_nk = await pb_nk_promise;
+  let roe_nk = { v: null, tag: "计算值", link: pe_nk.link };
+  if (pe_nk && pe_nk.v && pb_nk && pb_nk.v) { roe_nk.v = pb_nk.v / pe_nk.v; }
+  const erp_jp = await erp_jp_promise;
   let res_nk = await writeBlock(row, "日经指数", "JP", pe_nk, await rf_jp_promise, erp_jp.v, erp_jp.tag, erp_jp.link, roe_nk);
   row = res_nk.nextRow;
 
@@ -516,7 +445,7 @@ async function sendEmailIfEnabled(lines){
   let r_cx = vcMap["CSIH30533"];
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_cn = await erp_cn_promise;
+  const erp_cn = await erp_cn_promise;
   let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
   row = res_cx.nextRow;
 
@@ -527,38 +456,40 @@ async function sendEmailIfEnabled(lines){
   let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, "CN", pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
   row = res_hst.nextRow;
 
-  // 7) 德国DAX
+  // 7) 德国DAX
   let r_dax = vcMap["GDAXI"];
   let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
   let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_de = await erp_de_promise;
+  const erp_de = await erp_de_promise;
   let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
   row = res_dax.nextRow;
 
-  // 8) MSCI印度
-  let r_in = vcMap["935600"];
-  let pe_in = r_in?.pe ? { v: r_in.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_IN??"", tag:"兜底", link:"—" };
-  let roe_in = r_in?.roe ? { v: r_in.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
+  // 8) Nifty 50
+  const nifty_data = await nifty_promise;
+  const pe_nifty = nifty_data.peRes;
+  const pb_nifty = nifty_data.pbRes;
+  let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
+  if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
-  let res_in = await writeBlock(row, VC_TARGETS["935600"].name, "IN", pe_in, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_in);
-  row = res_in.nextRow;
-  
+  let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
+  row = res_in.nextRow;
+  
   console.log("[DONE]", todayStr(), {
-    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
-    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, in_pe: res_in.pe
+    hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
+    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, nifty_pe: res_in.pe
   });
-  
-  const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
+  
+  const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
   const lines = [
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
-    `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
+    `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
     `Nikkei PE: ${res_nk.pe ?? "-"} ${roeFmt(res_nk.roe)}→ ${res_nk.judgment ?? "-"}`,
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
-    `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
-    `MSCI India PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`
+    `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
+    `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`
   ];
   await sendEmailIfEnabled(lines);
 })();
