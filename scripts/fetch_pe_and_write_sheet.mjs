@@ -1,9 +1,12 @@
 /**
  * Version History
- * V2.9.10 - Fix Artifact Generation for Nifty 50
- * - Added a specific check in the Main block to verify if `fetchNifty50` returned valid data.
- * - If Nifty 50 data is null, the script will now correctly exit with error code 1.
- * - This ensures that if the Nifty 50 scrape fails, the debug artifacts will be uploaded correctly.
+ * V2.9.12 - Final Nifty 50 Fix (Hybrid Scrape)
+ * - Based on user's finding from debug files, the PE value is available in the <head> tags.
+ * - The PB value is only available after the page renders.
+ * - Rewrote `fetchNifty50` to use a hybrid strategy:
+ * 1. Immediately scrapes the PE value from the <title> tag's content.
+ * 2. Waits for the page to render and then scrapes the PB value from the rendered body.
+ * - This should be the final, robust solution for trendlyne.com.
  */
 
 import fetch from "node-fetch";
@@ -32,7 +35,7 @@ const VC_TARGETS = {
 
 // ===== Policy / Defaults =====
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
-const DELTA         = numOr(process.env.DELTA,      0.01);
+const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
 const RF_CN = numOr(process.env.RF_CN, 0.023);
@@ -280,30 +283,23 @@ async function fetchNifty50(){
   const pg  = await ctx.newPage();
   const url = "https://trendlyne.com/equity/PE/NIFTY/1887/nifty-50-price-to-earning-ratios/";
   try {
-    await pg.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await pg.waitForSelector('h1', { timeout: 15000 });
-    await pg.waitForTimeout(1000);
-
-    // --- Add Debugging Snapshot ---
-    console.log("[DEBUG] Taking Nifty50 snapshot before evaluation...");
-    await pg.screenshot({ path: 'debug_screenshot.png', fullPage: true });
-    const html = await pg.content();
-    fs.writeFileSync('debug_page.html', html);
-    console.log("[DEBUG] Nifty50 snapshot files saved.");
-    // --- End Snapshot ---
+    await pg.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
+    await pg.waitForTimeout(2000);
 
     const values = await pg.evaluate(() => {
       let pe = null;
       let pb = null;
 
-      const peHeading = document.querySelector('h1');
-      if (peHeading && peHeading.nextElementSibling) {
-          const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
-          if (peSpan) {
-              pe = parseFloat(peSpan.textContent.trim());
-          }
+      // Scrape PE from the meta description tag
+      const metaDesc = document.querySelector('meta[name="description"]');
+      if (metaDesc) {
+        const peMatch = metaDesc.content.match(/of NIFTY is ([\d\.]+)/);
+        if (peMatch) {
+            pe = parseFloat(peMatch[1]);
+        }
       }
 
+      // Scrape PB from the rendered body
       const allLinks = Array.from(document.querySelectorAll('a.btn'));
       const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
       if (pbLink) {
@@ -489,7 +485,7 @@ async function sendEmailIfEnabled(lines){
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
 
-  if (!pe_nifty.v || !pb_nifty.v) {
+  if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
     console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
     process.exit(1);
   }
