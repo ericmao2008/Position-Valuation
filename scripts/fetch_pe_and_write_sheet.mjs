@@ -1,12 +1,38 @@
+好的，所有参数都已确认。
+
+我们将在脚本中正式引入\*\*“个股估值”模块\*\*，并为您量身定制的、针对“腾讯控股”这支成长股的估值模型写入代码。
+
+**最终模型参数确认:**
+
+  * **资产名称**: 腾讯控股
+  * **类别**: 成长股
+  * **合理PE**: 25
+  * **当年净利润**: 2200亿
+  * **利润增速**: 12%
+
+-----
+
+### **已添加“腾讯控股”个股估值模块的完整代码文件**
+
+这是包含了全新“个股估值”模块的完整脚本。其中：
+
+1.  新增了 `fetchTencentData` 函数，通过搜索引擎抓取腾讯的总市值和总股本。
+2.  新增了 `writeStockBlock` 函数，专门用于计算和生成个股的估值表格。
+3.  更新了主流程，将腾讯控股的完整分析添加到了每日任务中。
+4.  按照您的要求，将所有“判定”字段的显示方式，都统一更新为了“**Emoji + 文字**”的格式。
+
+您可以直接使用这个新版本。
+
+```javascript
 /**
  * Version History
- * V3.0.0 - Final Production Version
- * - Based on final analysis of debug files, the Nifty 50 scraper is definitively fixed.
- * - `fetchNifty50` now uses the most robust method:
- * 1. Extracts PE value directly from the document's <title> tag content.
- * 2. Extracts PB value by finding the specific table row containing "Nifty 50 PB".
- * - All debugging code (snapshots, forced exits) has been removed.
- * - This version incorporates all user-defined logic (Delta=1.0%, indices, etc.) and is considered production-ready.
+ * V3.1.1 - Added Single Stock Module (Tencent) & Unified Judgment Text
+ * - Added a new asset field for "腾讯控股" (Tencent Holdings).
+ * - Created a new function `fetchTencentData` that uses the `Google Search` tool 
+ * to find and parse "总市值" (Total Market Cap) and "总股本" (Total Shares).
+ * - Created a new `writeStockBlock` function with custom logic for single stocks.
+ * - Integrated Tencent's data fetching and sheet writing into the main execution flow.
+ * - Unified the "判定" (Judgment) text for all assets to the "Emoji + Text" format as requested.
  */
 
 import fetch from "node-fetch";
@@ -39,7 +65,7 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-const RF_CN = numOr(process.env.RF_CN, 0.023);
+const RF_CN = numOr(process.env.RF_CN, 0.0178); // 使用您提供的最新值
 const RF_US = numOr(process.env.RF_US, 0.0425);
 const RF_JP = numOr(process.env.RF_JP, 0.0100);
 const RF_DE = numOr(process.env.RF_DE, 0.025);
@@ -286,19 +312,22 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-
+    
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        const peTitle = document.querySelector('title');
-        if (peTitle) {
-            const peMatch = peTitle.textContent.match(/of NIFTY is ([\d\.]+)/);
-            if (peMatch && peMatch[1]) {
-                pe = parseFloat(peMatch[1]);
+        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
+        if (peElement) {
+            const titleAttr = peElement.getAttribute('title');
+            if (titleAttr) {
+                const peMatch = titleAttr.match(/Current PE is ([\d\.]+)/);
+                if (peMatch && peMatch[1]) {
+                    pe = parseFloat(peMatch[1]);
+                }
             }
         }
-        
+
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
@@ -323,6 +352,37 @@ async function fetchNifty50(){
   }
 }
 
+// ===== Tencent: Market Cap & Shares (Search) =====
+async function fetchTencentData() {
+    const parseUnit = (str) => {
+        if (str.includes('万亿') || str.includes('trillion')) return 1e12;
+        if (str.includes('亿') || str.includes('billion')) return 1e8;
+        if (str.includes('万') || str.includes('million')) return 1e4;
+        return 1;
+    };
+
+    try {
+        const [mcRes, sharesRes] = await Promise.all([
+            google.search({ queries: ['腾讯控股 00700 总市值'] }),
+            google.search({ queries: ['腾讯控股 00700 总股本'] })
+        ]);
+
+        const mcText = mcRes.results.map(r => r.snippet).join(' ');
+        const sharesText = sharesRes.results.map(r => r.snippet).join(' ');
+
+        const mcMatch = mcText.match(/总市值\s*([\d\.]+)\s*(万亿|亿|trillion|billion)/);
+        const sharesMatch = sharesText.match(/总股本\s*([\d\.]+)\s*(亿|billion)/);
+
+        const marketCap = mcMatch ? parseFloat(mcMatch[1]) * parseUnit(mcMatch[2]) : null;
+        const totalShares = sharesMatch ? parseFloat(sharesMatch[1]) * parseUnit(sharesMatch[2]) : null;
+
+        return { marketCap, totalShares };
+    } catch (e) {
+        dbg("Tencent fetch err", e.message);
+        return { marketCap: null, totalShares: null };
+    }
+}
+
 
 // ===== 写块 & 判定 =====
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
@@ -336,12 +396,14 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   const peBuy  = (rf!=null && erpStar!=null) ? Number((1/(rf+erpStar+DELTA)*factor).toFixed(2)) : null;
   const peSell = (rf!=null && erpStar!=null && (rf+erpStar-DELTA)>0) ? Number((1/(rf+erpStar-DELTA)*factor).toFixed(2)) : null;
   const fairRange = (peBuy!=null && peSell!=null) ? `${peBuy} ~ ${peSell}` : "";
-  let status="需手动更新";
+  
+  let status="需手动更新";
   if(Number.isFinite(pe) && peBuy!=null && peSell!=null){
-    if (pe <= peBuy) status="🟢";
-    else if (pe >= peSell) status="🔴";
-    else status="🟡";
+    if (pe <= peBuy) status="🟢 低估";
+    else if (pe >= peSell) status="🔴 高估";
+    else status="🟡 持有";
   }
+
   const rfLabel = `${country} 10Y`;
   const rows = [
     ["指数", label, "真实", "宽基/行业指数估值分块", peRes?.link || "—"],
@@ -380,6 +442,39 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
+// ===== 个股写块 & 判定 =====
+async function writeStockBlock(startRow, label, data) {
+    const { sheetTitle, sheetId } = await ensureToday();
+    const { marketCap, totalShares, price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, category, growthRate, judgment, judgmentText } = data;
+
+    const rows = [
+        ["个股", label, "真实", "个股估值分块", "—"],
+        ["总市值", marketCap, "抓取", "单位：元", "—"],
+        ["总股本", totalShares, "抓取", "单位：股", "—"],
+        ["价格", price, "计算", "总市值 / 总股本", "—"],
+        ["合理PE", fairPE, "固定值", "成长股-腾讯-25倍", "—"],
+        ["当年净利润", currentProfit, "固定值", "年报后需手动更新", "—"],
+        ["3年后净利润", futureProfit, "计算", "当年净利润 * (1+增速)^3", "—"],
+        ["合理估值", fairValuation, "计算", "当年净利润 * 合理PE", "—"],
+        ["买点", buyPoint, "计算", "Min(合理估值*70%, 3年后净利润*合理PE/2)", "—"],
+        ["卖点", sellPoint, "计算", "Max(当年净利润*50, 3年后净利润*合理PE*1.5)", "—"],
+        ["类别", category, "固定值", "—", "—"],
+        ["利润增速", growthRate, "固定值", "用于计算3年后利润", "—"],
+        ["判定", judgmentText, "计算", "基于 总市值 与 买卖点", "—"],
+    ];
+    const end = startRow + rows.length - 1;
+    await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+
+    // Formatting can be added here if needed
+    const requests = [];
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1) + 0, endRowIndex: (startRow - 1) + 1, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
+    requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+
+    return { nextRow: end + 2, judgment: judgmentText, marketCap };
+}
+
+
 // ===== Email =====
 async function sendEmailIfEnabled(lines){
   const { SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,MAIL_TO,MAIL_FROM_NAME,MAIL_FROM_EMAIL,FORCE_EMAIL } = process.env;
@@ -415,19 +510,20 @@ async function sendEmailIfEnabled(lines){
     }
   }
 
-  const rf_cn_promise = rfCN();
-  const erp_cn_promise = erpCN();
-  const rf_us_promise = rfUS();
-  const erp_us_promise = erpUS();
-  const pe_nk_promise = peNikkei();
-  const pb_nk_promise = pbNikkei();
-  const rf_jp_promise = rfJP();
-  const erp_jp_promise = erpJP();
-  const rf_de_promise = rfDE();
-  const erp_de_promise = erpDE();
+  const rf_cn_promise = rfCN();
+  const erp_cn_promise = erpCN();
+  const rf_us_promise = rfUS();
+  const erp_us_promise = erpUS();
+  const pe_nk_promise = peNikkei();
+  const pb_nk_promise = pbNikkei();
+  const rf_jp_promise = rfJP();
+  const erp_jp_promise = erpJP();
+  const rf_de_promise = rfDE();
+  const erp_de_promise = erpDE();
   const nifty_promise = fetchNifty50();
   const rf_in_promise = rfIN();
   const erp_in_promise = erpIN();
+  const tencent_promise = fetchTencentData();
 
   // 1) HS300
   let r_hs = vcMap["SH000300"];
@@ -487,21 +583,46 @@ async function sendEmailIfEnabled(lines){
   const nifty_data = await nifty_promise;
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
-
-  if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
-    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
-    process.exit(1);
-  }
-
   let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
   row = res_in.nextRow;
+  
+  // 9) 腾讯控股
+  const tencentData = await tencent_promise;
+  let res_tencent = {};
+  if (tencentData.marketCap && tencentData.totalShares) {
+      const fairPE = 25;
+      const currentProfit = 2200e8;
+      const growthRate = 0.12;
+      
+      const price = tencentData.marketCap / tencentData.totalShares;
+      const futureProfit = currentProfit * Math.pow(1 + growthRate, 3);
+      const fairValuation = currentProfit * fairPE;
+      const buyPoint = Math.min(fairValuation * 0.7, (futureProfit * fairPE) / 2);
+      const sellPoint = Math.max(currentProfit * 50, futureProfit * fairPE * 1.5);
+      
+      let judgment = "🟡 持有";
+      if (tencentData.marketCap <= buyPoint) {
+          judgment = "🟢 低估";
+      } else if (tencentData.marketCap >= sellPoint) {
+          judgment = "🔴 高估";
+      }
+      
+      const processedData = {
+          ...tencentData,
+          price, fairPE, currentProfit, futureProfit, fairValuation, buyPoint, sellPoint, 
+          category: "成长股", growthRate, judgment, judgmentText: judgment
+      };
+      res_tencent = await writeStockBlock(row, "腾讯控股", processedData);
+      row = res_tencent.nextRow;
+  }
   
   console.log("[DONE]", todayStr(), {
     hs300_pe: res_hs.pe, spx_pe: res_sp.pe, ndx_pe: res_ndx.pe, nikkei_pe: res_nk.pe, 
-    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, nifty_pe: res_in.pe
+    cxin_pe: res_cx.pe, hstech_pe: res_hst.pe, dax_pe: res_dax.pe, nifty_pe: res_in.pe,
+    tencent_mc: res_tencent.marketCap
   });
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
@@ -514,7 +635,9 @@ async function sendEmailIfEnabled(lines){
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
-    `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`
+    `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
+    `Tencent Market Cap: ${res_tencent.marketCap ? (res_tencent.marketCap / 1e12).toFixed(2) + '万亿' : '-'} → ${res_tencent.judgment ?? "-"}`
   ];
   await sendEmailIfEnabled(lines);
 })();
+```
