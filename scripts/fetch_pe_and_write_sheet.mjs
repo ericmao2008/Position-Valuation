@@ -1,16 +1,17 @@
 /**
  * Version History
- * V2.9.13 - Final Artifact Path Fix
- * - The YML workflow now passes the GITHUB_WORKSPACE environment variable to the script.
- * - The `fetchNifty50` function now uses this variable to save snapshot files to an absolute path.
- * - This ensures the `upload-artifact` step can always find the debug files.
+ * V2.9.15 - Final Nifty 50 Fix based on HTML Analysis
+ * - Rewrote `fetchNifty50`'s scraping logic based on the user-provided debug HTML files.
+ * - PE is now extracted from a div's title attribute.
+ * - PB is now extracted by finding the correct table row and then the specific value cell.
+ * - This version should be the definitive fix for the trendlyne.com scraper.
  */
 
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import fs from "fs";
-import path from "path"; // Import path module
+import path from "path";
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -293,28 +294,35 @@ async function fetchNifty50(){
     const html = await pg.content();
     fs.writeFileSync(htmlPath, html);
     console.log("[DEBUG] Nifty50 snapshot files saved.");
-
+    
     const values = await pg.evaluate(() => {
-      let pe = null;
-      let pb = null;
-      
-      const peHeading = document.querySelector('h1');
-      if (peHeading && peHeading.nextElementSibling) {
-          const peSpan = peHeading.nextElementSibling.querySelector('span:nth-child(1)');
-          if (peSpan) {
-              pe = parseFloat(peSpan.textContent.trim());
-          }
-      }
-      
-      const allLinks = Array.from(document.querySelectorAll('a.btn'));
-      const pbLink = allLinks.find(el => el.textContent.includes('Nifty 50 PB'));
-      if (pbLink) {
-          const pbMatch = pbLink.textContent.trim().match(/(\d+\.?\d*)/);
-          if (pbMatch) {
-              pb = parseFloat(pbMatch[1]);
-          }
-      }
-      return { pe, pb };
+        let pe = null;
+        let pb = null;
+
+        // New PE Logic based on debug file
+        const peElement = document.querySelector('div.bullet-graph');
+        if (peElement) {
+            const titleAttr = peElement.getAttribute('title');
+            const peMatch = titleAttr.match(/Current PE is ([\d\.]+)/);
+            if (peMatch && peMatch[1]) {
+                pe = parseFloat(peMatch[1]);
+            }
+        }
+
+        // New PB Logic based on debug file
+        const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
+        const pbRow = allRows.find(row => {
+            const titleEl = row.querySelector('th a span.stock-indicator-title');
+            return titleEl && titleEl.textContent.includes('PB');
+        });
+        if (pbRow) {
+            const pbValueElement = pbRow.querySelector('td.block_content span.fs1p5rem');
+            if (pbValueElement) {
+                pb = parseFloat(pbValueElement.textContent.trim());
+            }
+        }
+        
+        return { pe, pb };
     });
     
     const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
