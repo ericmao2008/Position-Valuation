@@ -1,12 +1,8 @@
 /**
  * Version History
- * V4.8.0 - 周期股逻辑 & 分众传媒 & δ百分比
- * - 指数块：“容忍带 δ”按百分比显示
- * - 新增个股：分众传媒（SHE:002027）
- * - 新增字段：平均净利润（仅“类别=周期股”时参与估值/买卖点）
- *   * 周期股：合理估值=平均净利润×合理PE；买点=合理估值×70%；卖点=合理估值×150%
- * - 邮件增加分众传媒（折扣率+判定）
- * 其它保持 V4.7.0 既有逻辑（茅台=成长股；折扣率字段；Nikkei 区间两位小数等）
+ * V4.9.0 - Nikkei 邮件改为显示“判定”
+ * - 在日经写块后读取“判定”单元格，在邮件中显示“日经指数”的判定结果
+ * - 保持 V4.8.0 的周期股逻辑、分众传媒（合理PE=25）、δ百分比等
  */
 
 import fetch from "node-fetch";
@@ -130,7 +126,9 @@ async function fetchVCMapDOM(){
       let targetIndex = -1;
       for (let i = 0; i < nameDivs.length; i++) {
         const nameDivText = nameDivs[i].textContent || '';
-        if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) { targetIndex = i; break; }
+        if (nameDivText.includes(target.name) 或 nameDivText.includes(target.code)) { // 兼容中/英
+          targetIndex = i; break;
+        }
       }
       if (targetIndex !== -1) {
         const dataRow = rows[targetIndex];
@@ -160,7 +158,7 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP*（略：与 V4.7 相同）=====
+// ===== r_f / ERP*（与 V4.8 相同）=====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -242,10 +240,12 @@ async function fetchNifty50(){
     const values = await pg.evaluate(() => {
       let pe = null, pb = null;
       const peTitle = document.querySelector('title');
-      if (peTitle) { const m = peTitle.textContent.match(/of NIFTY is ([\d\.]+)/); if (m && m[1]) pe = parseFloat(m[1]); }
+      const m = peTitle?.textContent?.match(/of NIFTY is ([\d\.]+)/);
+      if (m && m[1]) pe = parseFloat(m[1]);
       const rows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
       const pbRow = rows.find(r => (r.querySelector('th a span.stock-indicator-title')||{}).textContent?.includes('PB'));
-      if (pbRow) { const el = pbRow.querySelector('td.block_content span.fs1p5rem'); if (el) pb = parseFloat(el.textContent.trim()); }
+      const el = pbRow?.querySelector('td.block_content span.fs1p5rem');
+      if (el) pb = parseFloat(el.textContent.trim());
       return { pe, pb };
     });
     const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
@@ -295,11 +295,11 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
   const requests = [];
-  // 百分比：E/P(3)、r_f(4)、ERP*(5)、δ(6)、ROE(10)、ROE基准(11)  ← ★将 δ(第6行)也设为百分比
+  // 百分比
   [3,4,5,6,10,11].forEach(i=>{ const r=(startRow-1)+i-1;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  // 数值两位小数：P/E(2)、买点(7)、卖点(8)、ROE倍数因子(12)
+  // 数值
   [2,7,8,12].forEach(i=>{ const r=(startRow-1)+i-1;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }}); });
@@ -347,12 +347,10 @@ async function writeStockBlock(startRow, config) {
     ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
     ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
     ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
-    ["平均净利润", (averageProfit!=null? averageProfit/E8 : ""), "Fixed", "仅“类别=周期股”时生效", "—"], // ★
+    ["平均净利润", (averageProfit!=null? averageProfit/E8 : ""), "Fixed", "仅“类别=周期股”时生效", "—"],
     ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
-    // ★ 合理估值：周期股用 平均净利润 × 合理PE；否则用 当年净利润 × 合理PE
     ["合理估值", `=IF(B${categoryRow}="周期股", B${avgProfitRow}*B${fairPERow}, B${currentProfitRow}*B${fairPERow})`, "Formula", "周期股用平均净利润", "—"],
     ["折扣率", `=IFERROR(B${mcRow}/B${fairValuationRow},"")`, "Formula", "总市值 ÷ 合理估值", "—"],
-    // ★ 买卖点：周期股用 0.7×FV / 1.5×FV；非周期沿用原公式
     ["买点",  `=IF(B${categoryRow}="周期股", B${fairValuationRow}*0.7, MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2))`, "Formula", "周期=0.7×合理估值", "—"],
     ["卖点",  `=IF(B${categoryRow}="周期股", B${fairValuationRow}*1.5, MAX(B${currentProfitRow}*50, B${futureProfitRow}*B${fairPERow}*1.5))`, "Formula", "周期=1.5×合理估值", "—"],
     ["类别", category, "Fixed", "—", "—"],
@@ -383,13 +381,12 @@ async function writeStockBlock(startRow, config) {
   // 折扣率（%）
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:discountRow-1, endRowIndex:discountRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
 
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-
-  // 返回可供邮件读取的单元格地址
+  // 应邮件读取的单元格地址
   const discountCellA1 = `'${sheetTitle}'!B${discountRow}`;
   const judgmentCellA1 = `'${sheetTitle}'!B${judgmentRow}`;
   const nameCellA1     = `'${sheetTitle}'!B${startRow}`;
 
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
   return { nextRow: end + 2, discountCellA1, judgmentCellA1, nameCellA1 };
 }
 
@@ -467,7 +464,8 @@ async function sendEmailIfEnabled(lines){
   let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
   row = res_ndx.nextRow;
 
-  // 4) Nikkei（公式，区间两位小数 & δ百分比已保留）
+  // 4) Nikkei（公式块：读取判定用于邮件）
+  let res_nikkei = { judgment: "-" };
   {
     const startRow = row;
     const rfRes = await rf_jp_promise;
@@ -506,29 +504,28 @@ async function sendEmailIfEnabled(lines){
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
     
     const requests = [];
-    // 百分比：E/P, r_f, ERP*, δ, ROE, ROE基准
-    [4,5,6,7,11,12].forEach(i => {
-      const r = (startRow - 1) + (i - 1);
+    [4,5,6,7,11,12].forEach(i => { const r = (startRow - 1) + (i - 1);
       requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
     });
-    // 数值：P/E、P/B、买点、卖点、ROE倍数因子
-    [2,3,8,9,13].forEach(i => {
-      const r = (startRow - 1) + (i - 1);
+    [2,3,8,9,13].forEach(i => { const r = (startRow - 1) + (i - 1);
       requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00" } } }, fields: "userEnteredFormat.numberFormat" } });
     });
-    // Header + 边框
     requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-    
+
+    // 读取“判定”字段（该块最后一行B列）
+    const nikkeiStatusCell = `'${sheetTitle}'!B${end}`;
+    res_nikkei.judgment = await readOneCell(nikkeiStatusCell);
+
     row = end + 2;
   }
 
   // 5) 中概互联50
+  const erp_cn = await erp_cn_promise;
   let r_cx = vcMap["CSIH30533"];
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_cn = await erp_cn_promise;
   let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
   row = res_cx.nextRow;
 
@@ -540,10 +537,10 @@ async function sendEmailIfEnabled(lines){
   row = res_hst.nextRow;
 
   // 7) 德国DAX
+  const erp_de = await erp_de_promise;
   let r_dax = vcMap["GDAXI"];
   let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
   let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_de = await erp_de_promise;
   let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
   row = res_dax.nextRow;
 
@@ -574,15 +571,15 @@ async function sendEmailIfEnabled(lines){
     priceFormula: `=GOOGLEFINANCE("HKG:0700", "price")`,
     totalShares: 9772000000,
     fairPE: 25,
-    currentProfit: 220000000000, // 2200亿
-    averageProfit: null,         // 非周期，可为空
+    currentProfit: 220000000000,
+    averageProfit: null,
     growthRate: 0.12,
     category: "成长股"
   };
   const tRes = await writeStockBlock(row, tencentConfig);
   row = tRes.nextRow;
   
-  // 10) 贵州茅台（固定“成长股”）
+  // 10) 贵州茅台（成长股）
   const moutaiConfig = {
     label: "贵州茅台",
     ticker: "SHA:600519",
@@ -590,24 +587,24 @@ async function sendEmailIfEnabled(lines){
     totalShares: 1256197800,
     fairPE: 30,
     currentProfit: 74753000000,
-    averageProfit: null,         // 非周期，可为空
+    averageProfit: null,
     growthRate: 0.09,
     category: "成长股"
   };
   const mRes = await writeStockBlock(row, moutaiConfig);
   row = mRes.nextRow;
 
-  // 11) 分众传媒（周期股：平均净利润=46亿）
+  // 11) 分众传媒（周期股：平均净利润=46亿；合理PE=25）
   const focusMediaConfig = {
     label: "分众传媒",
     ticker: "SHE:002027",
     priceFormula: `=GOOGLEFINANCE("SHE:002027","price")`,
-    totalShares: 13760000000,     // 约137.6亿股（如有出入可在表内改“总股本”）
-    fairPE: 25,                   // 周期股合理PE（可按你口径调整）
-    currentProfit: 0,             // 周期股不参与估值也可留0
-    averageProfit: 4600000000,    // ★ 46亿
-    growthRate: 0.00,             // 周期股不依赖未来利润公式
-    category: "周期股"            // ★固定为周期股
+    totalShares: 13760000000,
+    fairPE: 25,
+    currentProfit: 0,
+    averageProfit: 4600000000,
+    growthRate: 0.00,
+    category: "周期股"
   };
   const fRes = await writeStockBlock(row, focusMediaConfig);
   row = fRes.nextRow;
@@ -628,12 +625,11 @@ async function sendEmailIfEnabled(lines){
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
     `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
-    `Nikkei Valuation → Please see the sheet for live judgments.`,
+    `Nikkei 判定: ${res_nikkei.judgment || "-"}`, // ★ 使用“判定”
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    // 子公司：仅“折扣率 + 判定”
     `Tencent 折扣率: ${tencentDiscount || "-"} → ${tencentJudge || "-"}`,
     `贵州茅台 折扣率: ${moutaiDiscount || "-"} → ${moutaiJudge || "-"}`,
     `分众传媒 折扣率: ${focusDiscount || "-"} → ${focusJudge || "-"}`
