@@ -1,10 +1,12 @@
 /**
  * Version History
- * V2.9.16 - Final Nifty 50 Fix based on HTML Analysis
- * - Rewrote `fetchNifty50`'s scraping logic based on the user-provided debug HTML files.
- * - PE is now extracted from a div's title attribute using regex.
- * - PB is now extracted by finding the correct table row and then the specific value cell.
- * - Removed debugging code (snapshots, forced exits) as the issue should now be resolved.
+ * V3.0.0 - Final Production Version
+ * - Based on final analysis of debug files, the Nifty 50 scraper is definitively fixed.
+ * - `fetchNifty50` now uses the most robust method:
+ * 1. Extracts PE value directly from the document's <title> tag content.
+ * 2. Extracts PB value by finding the specific table row containing "Nifty 50 PB".
+ * - All debugging code (snapshots, forced exits) has been removed.
+ * - This version incorporates all user-defined logic (Delta=1.0%, indices, etc.) and is considered production-ready.
  */
 
 import fetch from "node-fetch";
@@ -284,22 +286,19 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-    
+
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
-        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
-        if (peElement) {
-            const titleAttr = peElement.getAttribute('title');
-            if (titleAttr) {
-                const peMatch = titleAttr.match(/Current PE is ([\d\.]+)/);
-                if (peMatch && peMatch[1]) {
-                    pe = parseFloat(peMatch[1]);
-                }
+        const peTitle = document.querySelector('title');
+        if (peTitle) {
+            const peMatch = peTitle.textContent.match(/of NIFTY is ([\d\.]+)/);
+            if (peMatch && peMatch[1]) {
+                pe = parseFloat(peMatch[1]);
             }
         }
-
+        
         const allRows = Array.from(document.querySelectorAll('tr.stock-indicator-tile-v2'));
         const pbRow = allRows.find(row => {
             const titleEl = row.querySelector('th a span.stock-indicator-title');
