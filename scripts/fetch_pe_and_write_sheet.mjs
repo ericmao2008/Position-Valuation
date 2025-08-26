@@ -285,13 +285,13 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-    
+
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
 
         // New PE Logic based on debug file
-        const peElement = document.querySelector('div.bullet-graph');
+        const peElement = document.querySelector('div[data-tooltip][data-html="true"]');
         if (peElement) {
             const titleAttr = peElement.getAttribute('title');
             if (titleAttr) {
@@ -479,7 +479,7 @@ async function sendEmailIfEnabled(lines){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
     
     if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
+      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting.");
       process.exit(1);
     }
   }
