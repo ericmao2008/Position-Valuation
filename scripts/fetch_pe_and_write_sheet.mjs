@@ -126,7 +126,7 @@ async function fetchVCMapDOM(){
       let targetIndex = -1;
       for (let i = 0; i < nameDivs.length; i++) {
         const nameDivText = nameDivs[i].textContent || '';
-        if (nameDivText.includes(target.name) 或 nameDivText.includes(target.code)) { // 兼容中/英
+        if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) { // 兼容中/英
           targetIndex = i; break;
         }
       }
