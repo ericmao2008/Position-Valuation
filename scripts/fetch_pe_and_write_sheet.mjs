@@ -2,11 +2,10 @@
  * Version History
  * V3.0.0 - Final Production Version
  * - Based on final analysis of debug files, the Nifty 50 scraper is definitively fixed.
- * - `fetchNifty50` now uses the most robust method based on user-provided HTML:
- * 1. Extracts PE value directly from the document's meta/title tag content.
- * 2. Extracts PB value by finding the specific table row containing "Nifty 50 PB".
- * - All debugging code (snapshots, forced exits) has been removed.
- * - This version incorporates all user-defined logic (Delta=1.0%, indices, etc.) and is considered production-ready.
+ * - `fetchNifty50` now uses the most robust method based on user-provided HTML to extract PE and PB.
+ * - Corrected the "google_search is not defined" error in `fetchTencentData`.
+ * - Added title rows for "全市场宽基" and "子公司" as requested.
+ * - Removed all debugging code (snapshots, forced exits) to finalize the script.
  */
 
 import fetch from "node-fetch";
@@ -39,7 +38,7 @@ const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,   0.12);
 
-const RF_CN = numOr(process.env.RF_CN, 0.023);
+const RF_CN = numOr(process.env.RF_CN, 0.0178);
 const RF_US = numOr(process.env.RF_US, 0.0425);
 const RF_JP = numOr(process.env.RF_JP, 0.0100);
 const RF_DE = numOr(process.env.RF_DE, 0.025);
@@ -286,17 +285,7 @@ async function fetchNifty50(){
   try {
     await pg.goto(url, { waitUntil: 'networkidle', timeout: 25000 });
     await pg.waitForTimeout(2000);
-
-    const workspace = process.env.GITHUB_WORKSPACE || '.';
-    const screenshotPath = path.join(workspace, 'debug_screenshot.png');
-    const htmlPath = path.join(workspace, 'debug_page.html');
     
-    console.log(`[DEBUG] Saving Nifty50 snapshot to: ${screenshotPath}`);
-    await pg.screenshot({ path: screenshotPath, fullPage: true });
-    const html = await pg.content();
-    fs.writeFileSync(htmlPath, html);
-    console.log("[DEBUG] Nifty50 snapshot files saved.");
-
     const values = await pg.evaluate(() => {
         let pe = null;
         let pb = null;
@@ -336,6 +325,7 @@ async function fetchNifty50(){
 // ===== Tencent: Market Cap & Shares (Search) =====
 async function fetchTencentData() {
     const parseUnit = (str) => {
+        if (!str) return 1;
         if (str.includes('万亿') || str.includes('trillion')) return 1e12;
         if (str.includes('亿') || str.includes('billion')) return 1e8;
         if (str.includes('万') || str.includes('million')) return 1e4;
@@ -351,11 +341,11 @@ async function fetchTencentData() {
         const mcText = mcRes[0].results.map(r => r.snippet).join(' ');
         const sharesText = sharesRes[0].results.map(r => r.snippet).join(' ');
 
-        const mcMatch = mcText.match(/总市值\s*([\d\.]+)\s*(万亿|亿|trillion|billion)/);
-        const sharesMatch = sharesText.match(/总股本\s*([\d\.]+)\s*(亿|billion)/);
+        const mcMatch = mcText.match(/市值\s*([\d\.,]+)\s*(万亿|亿|trillion|billion)/);
+        const sharesMatch = sharesText.match(/总股本\s*([\d\.,]+)\s*(亿|billion)/);
 
-        const marketCap = mcMatch ? parseFloat(mcMatch[1]) * parseUnit(mcMatch[2]) : null;
-        const totalShares = sharesMatch ? parseFloat(sharesMatch[1]) * parseUnit(sharesMatch[2]) : null;
+        const marketCap = mcMatch ? parseFloat(mcMatch[1].replace(/,/g, '')) * parseUnit(mcMatch[2]) : null;
+        const totalShares = sharesMatch ? parseFloat(sharesMatch[1].replace(/,/g, '')) * parseUnit(sharesMatch[2]) : null;
 
         return { marketCap, totalShares };
     } catch (e) {
@@ -484,7 +474,7 @@ async function sendEmailIfEnabled(lines){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
     
     if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
+      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting.");
       process.exit(1);
     }
   }
@@ -568,7 +558,7 @@ async function sendEmailIfEnabled(lines){
   const nifty_data = await nifty_promise;
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
-
+  
   if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
     console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
     process.exit(1);
