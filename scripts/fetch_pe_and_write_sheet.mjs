@@ -2,7 +2,6 @@
  * Version History
  * V5.1.0 - Notion极简同步（Name/Valuation/AssetType/Category/[Date]）
  * - 仅把类似邮件的单行摘要写入 Notion
- * - 字段映射：Name, Valuation, AssetType, Category, (可选)Date
  * - 其它估值/Sheet/邮件逻辑保持 V5.0
  */
 
@@ -23,7 +22,7 @@ const PROP_SIMPLE = {
   Valuation: "Valuation",
   AssetType: "AssetType",
   Category: "Category",
-  Date: "Date",         // 可选：库里没有也能跑
+  Date: "Date", // 可选：库里没有也能跑
 };
 
 // 缓存数据库可用列，避免 property_not_found
@@ -224,7 +223,7 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP*（与 V4.8 相同）=====
+// ===== r_f =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -270,6 +269,29 @@ async function rfIN(){ try{
     if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}[.,]\d{1,4})\s*%/); if(near) v=Number(String(near[1]).replace(',','.'))/100; }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","IN 10Y")` };
   }}catch{} return { v:RF_IN, tag:"兜底", link:"—" }; }
+
+// ===== ERP*（达摩达兰）=====
+async function erpFromDamodaran(re){
+  try{
+    const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
+    const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
+    if(r.ok){
+      const h = await r.text();
+      const rows = h.split("</tr>");
+      const row  = rows.find(x => re.test(x)) || "";
+      const plain = row.replace(/<[^>]+>/g," ");
+      const nums = [...plain.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
+      const v = nums.find(x=>x>2 && x<10);
+      if(v!=null) return { v:v/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran")` };
+    }
+  }catch{}
+  return null;
+}
+async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
 
 // ===== Nifty 50（Playwright）=====
 async function fetchNifty50(){
@@ -637,14 +659,14 @@ async function sendEmailIfEnabled(lines){
   }
 
   const lines = [
-    `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
-    `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
-    `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
+    `HS300 PE: ${r_hs ? (r_hs.pe ?? "-") : "-"} ${roeFmt(r_hs ? r_hs.roe : null)}→ ${r_hs ? r_hs.judgment : "-"}`,
+    `SPX PE: ${r_sp ? (r_sp.pe ?? "-") : "-"} ${roeFmt(r_sp ? r_sp.roe : null)}→ ${r_sp ? r_sp.judgment : "-"}`,
+    `NDX PE: ${r_ndx ? (r_ndx.pe ?? "-") : "-"} ${roeFmt(r_ndx ? r_ndx.roe : null)}→ ${r_ndx ? r_ndx.judgment : "-"}`,
     `Nikkei → ${res_nikkei.judgment || "-"}`,
-    `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
-    `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
-    `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
-    `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
+    `China Internet PE: ${r_cx ? (r_cx.pe ?? "-") : "-"} ${roeFmt(r_cx ? r_cx.roe : null)}→ ${r_cx ? r_cx.judgment : "-"}`,
+    `HSTECH PE: ${r_hst ? (r_hst.pe ?? "-") : "-"} ${roeFmt(r_hst ? r_hst.roe : null)}→ ${r_hst ? r_hst.judgment : "-"}`,
+    `DAX PE: ${r_dax ? (r_dax.pe ?? "-") : "-"} ${roeFmt(r_dax ? r_dax.roe : null)}→ ${r_dax ? r_dax.judgment : "-"}`,
+    `Nifty 50 PE: ${r_in ? (r_in.pe ?? "-") : (res_in.pe ?? "-")} ${roeFmt(r_in ? r_in.roe : res_in.roe)}→ ${r_in ? r_in.judgment : res_in.judgment}`,
     ...stockLines
   ];
 
