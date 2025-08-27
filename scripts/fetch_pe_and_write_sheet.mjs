@@ -1,8 +1,12 @@
 /**
  * Version History
- * V4.9.0 - Nikkei 邮件改为显示“判定”
- * - 在日经写块后读取“判定”单元格，在邮件中显示“日经指数”的判定结果
- * - 保持 V4.8.0 的周期股逻辑、分众传媒（合理PE=25）、δ百分比等
+ * V5.0.0 - 配置化数组 & 自动价格公式
+ * - 个股改为 STOCKS 配置数组；主程序循环渲染
+ * - 自动根据 ticker 前缀生成价格公式：
+ *   * SHA:600519 -> =getSinaPrice("sh600519")
+ *   * SHE:002027 -> =GOOGLEFINANCE("SHE:002027","price")
+ *   * HKG:0700   -> =GOOGLEFINANCE("HKG:0700","price")
+ * - 保留：δ百分比、Nikkei邮件=判定字段、周期股平均净利逻辑、邮件“折扣率+判定”
  */
 
 import fetch from "node-fetch";
@@ -122,22 +126,18 @@ async function fetchVCMapDOM(){
 
     if (rows.length === 0 || nameDivs.length === 0 || rows.length !== nameDivs.length) return { error: 'Mismatch' };
 
-    for (const [code, target] of Object.entries(targets)) {
-      let targetIndex = -1;
-      for (let i = 0; i < nameDivs.length; i++) {
-        const nameDivText = nameDivs[i].textContent || '';
-        if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) { // 兼容中/英
-          targetIndex = i; break;
-        }
-      }
-      if (targetIndex !== -1) {
-        const dataRow = rows[targetIndex];
-        if (dataRow) {
-          const peEl = dataRow.querySelector('.pe');
-          const roeEl = dataRow.querySelector('.roe');
-          const pe = toNum(peEl ? peEl.textContent : null);
-          const roe = pct2d(roeEl ? roeEl.textContent : null);
-          if(pe && pe > 0) out[code] = { pe, roe };
+    for (let i = 0; i < nameDivs.length; i++) {
+      const nameDivText = nameDivs[i].textContent || '';
+      for (const [code, target] of Object.entries(targets)) {
+        if (nameDivText.includes(target.name) || nameDivText.includes(target.code)) {
+          const dataRow = rows[i];
+          if (dataRow) {
+            const peEl = dataRow.querySelector('.pe');
+            const roeEl = dataRow.querySelector('.roe');
+            const pe = toNum(peEl ? peEl.textContent : null);
+            const roe = pct2d(roeEl ? roeEl.textContent : null);
+            if(pe && pe > 0) out[code] = { pe, roe };
+          }
         }
       }
     }
@@ -200,8 +200,8 @@ async function rfIN(){ try{
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
   if(r.ok){
     const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
+    const m=h.match(/(\d{1,2}[.,]\d{1,4})</i); if(m) v=Number(String(m[1]).replace(',','.'))/100;
+    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}[.,]\d{1,4})\s*%/); if(near) v=Number(String(near[1]).replace(',','.'))/100; }
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","IN 10Y")` };
   }}catch{} return { v:RF_IN, tag:"兜底", link:"—" }; }
 
@@ -317,77 +317,160 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
-// ===== 个股写块（含“平均净利润”“周期股逻辑”） =====
-async function writeStockBlock(startRow, config) {
+/* =========================
+   配置化：个股数组 + 类别规则
+   ========================= */
+
+// 1) 个股配置（只改这里即可）
+const STOCKS = [
+  {
+    label: "腾讯控股",
+    ticker: "HKG:0700",
+    totalShares: 9772000000,
+    fairPE: 25,
+    currentProfit: 220000000000,
+    averageProfit: null,
+    growthRate: 0.12,
+    category: "成长股"
+  },
+  {
+    label: "贵州茅台",
+    ticker: "SHA:600519",
+    totalShares: 1256197800,
+    fairPE: 30,
+    currentProfit: 74753000000,
+    averageProfit: null,
+    growthRate: 0.09,
+    category: "成长股"
+  },
+  {
+    label: "分众传媒",
+    ticker: "SHE:002027",
+    totalShares: 13760000000,
+    fairPE: 25,
+    currentProfit: 0,
+    averageProfit: 4600000000, // 46亿
+    growthRate: 0.00,
+    category: "周期股"
+  },
+];
+
+// 2) 根据 ticker 生成价格公式（可被显式 priceFormula 覆盖）
+function priceFormulaFromTicker(ticker){
+  const [ex, code] = String(ticker||"").split(":");
+  if(!ex || !code) return "";
+  if(ex === "SHA") return `=getSinaPrice("sh${code}")`;
+  if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;
+  return `=GOOGLEFINANCE("${ex}:${code}","price")`; // HKG/NYSE/NASDAQ 等
+}
+
+// 3) 类别→估值规则
+const CATEGORY_RULES = {
+  "周期股": (r) => ({
+    fairVal: `=B${r.avgProfit}*B${r.fairPE}`,
+    buy:     `=B${r.fairVal}*0.7`,
+    sell:    `=B${r.fairVal}*1.5`,
+    require: ["avgProfit"]
+  }),
+  "成长股": (r) => ({
+    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
+    buy:     `=MIN(B${r.fairVal}*0.7, (B${r.futureProfit}*B${r.fairPE})/2)`,
+    sell:    `=MAX(B${r.currentProfit}*50, B${r.futureProfit}*B${r.fairPE}*1.5)`,
+    require: ["currentProfit"]
+  }),
+  "价值股": (r) => ({
+    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
+    buy:     `=MIN(B${r.fairVal}*0.7, (B${r.futureProfit}*B${r.fairPE})/2)`,
+    sell:    `=MAX(B${r.currentProfit}*50, B${r.futureProfit}*B${r.fairPE}*1.5)`,
+    require: ["currentProfit"]
+  }),
+};
+
+// ===== 个股写块（引用类别规则 & 自动价格公式） =====
+async function writeStockBlock(startRow, cfg) {
   const { sheetTitle, sheetId } = await ensureToday();
-  const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category, priceFormula } = config;
+  const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category } = cfg;
+  const priceFormula = cfg.priceFormula ?? priceFormulaFromTicker(ticker);
 
-  // 行位次（含平均净利润）
-  const priceRow           = startRow + 1;
-  const mcRow              = startRow + 2;
-  const shRow              = startRow + 3;
-  const fairPERow          = startRow + 4;
-  const currentProfitRow   = startRow + 5;
-  const avgProfitRow       = startRow + 6;   // ★平均净利润
-  const futureProfitRow    = startRow + 7;
-  const fairValuationRow   = startRow + 8;
-  const discountRow        = startRow + 9;   // 折扣率
-  const buyPointRow        = startRow + 10;
-  const sellPointRow       = startRow + 11;
-  const categoryRow        = startRow + 12;
-  const growthRateRow      = startRow + 13;
-  const judgmentRow        = startRow + 14;
+  const rule = CATEGORY_RULES[category];
+  if(!rule) throw new Error(`未知类别: ${category}`);
+  if(rule.require){
+    for(const need of rule.require){
+      if(need==="avgProfit" && !(averageProfit>0)) throw new Error(`[${label}] 周期股必须提供 averageProfit`);
+      if(need==="currentProfit" && !(currentProfit>0)) throw new Error(`[${label}] ${category} 必须提供 currentProfit`);
+    }
+  }
 
-  const E8 = 100000000; // 1亿
+  const E8 = 100000000;
+  // 行映射
+  const r = {
+    title:         startRow,
+    price:         startRow + 1,
+    mc:            startRow + 2,
+    shares:        startRow + 3,
+    fairPE:        startRow + 4,
+    currentProfit: startRow + 5,
+    avgProfit:     startRow + 6,
+    futureProfit:  startRow + 7,
+    fairVal:       startRow + 8,
+    discount:      startRow + 9,
+    buy:           startRow + 10,
+    sell:          startRow + 11,
+    category:      startRow + 12,
+    growth:        startRow + 13,
+    judgment:      startRow + 14,
+  };
+  const f = rule(r);
 
   const rows = [
     ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
     ["价格", priceFormula, "Formula", "实时价格", "Google Finance"],
-    ["总市值", `=(B${priceRow}*B${shRow})`, "Formula", "价格 × 总股本", "—"],
+    ["总市值", `=(B${r.price}*B${r.shares})`, "Formula", "价格 × 总股本", "—"],
     ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
     ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
-    ["当年净利润", currentProfit / E8, "Fixed", "年报后需手动更新", "—"],
+    ["当年净利润", (currentProfit||0) / E8, "Fixed", "年报后需手动更新", "—"],
     ["平均净利润", (averageProfit!=null? averageProfit/E8 : ""), "Fixed", "仅“类别=周期股”时生效", "—"],
-    ["3年后净利润", `=B${currentProfitRow} * (1+B${growthRateRow})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
-    ["合理估值", `=IF(B${categoryRow}="周期股", B${avgProfitRow}*B${fairPERow}, B${currentProfitRow}*B${fairPERow})`, "Formula", "周期股用平均净利润", "—"],
-    ["折扣率", `=IFERROR(B${mcRow}/B${fairValuationRow},"")`, "Formula", "总市值 ÷ 合理估值", "—"],
-    ["买点",  `=IF(B${categoryRow}="周期股", B${fairValuationRow}*0.7, MIN(B${fairValuationRow}*0.7, (B${futureProfitRow}*B${fairPERow})/2))`, "Formula", "周期=0.7×合理估值", "—"],
-    ["卖点",  `=IF(B${categoryRow}="周期股", B${fairValuationRow}*1.5, MAX(B${currentProfitRow}*50, B${futureProfitRow}*B${fairPERow}*1.5))`, "Formula", "周期=1.5×合理估值", "—"],
+    ["3年后净利润", `=B${r.currentProfit} * (1+B${r.growth})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
+    ["合理估值", f.fairVal, "Formula", "由类别规则生成", "—"],
+    ["折扣率", `=IFERROR(B${r.mc}/B${r.fairVal},"")`, "Formula", "总市值 ÷ 合理估值", "—"],
+    ["买点", f.buy, "Formula", "由类别规则生成", "—"],
+    ["卖点", f.sell, "Formula", "由类别规则生成", "—"],
     ["类别", category, "Fixed", "—", "—"],
-    ["利润增速", growthRate, "Fixed", "用于计算3年后利润（非周期）", "—"],
-    ["判定", `=IF(ISNUMBER(B${mcRow}), IF(B${mcRow} <= B${buyPointRow}, "🟢 低估", IF(B${mcRow} >= B${sellPointRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
+    ["利润增速", growthRate, "Fixed", "用于“成长/价值股”的未来利润", "—"],
+    ["判定", `=IF(ISNUMBER(B${r.mc}), IF(B${r.mc} <= B${r.buy}, "🟢 低估", IF(B${r.mc} >= B${r.sell}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
   ];
-  const end = startRow + rows.length - 1;
-  await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
+  await write(`'${sheetTitle}'!A${startRow}:E${startRow + rows.length - 1}`, rows);
 
+  // 样式（保持你原先格式）
   const requests = [];
   // Header + 边框
   requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-  requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-  
-  // 数值按“亿”
-  [mcRow-1, currentProfitRow-1, avgProfitRow-1, futureProfitRow-1, fairValuationRow-1, buyPointRow-1, sellPointRow-1]
-    .forEach(rIdx => {
-      requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-  // 总股本（亿，2位小数）
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:shRow-1, endRowIndex:shRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 价格
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:priceRow-1, endRowIndex:priceRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 合理PE（整数）
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:fairPERow-1, endRowIndex:fairPERow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 增速（%）
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:growthRateRow-1, endRowIndex:growthRateRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 折扣率（%）
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:discountRow-1, endRowIndex:discountRow, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+  requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
 
-  // 应邮件读取的单元格地址
-  const discountCellA1 = `'${sheetTitle}'!B${discountRow}`;
-  const judgmentCellA1 = `'${sheetTitle}'!B${judgmentRow}`;
-  const nameCellA1     = `'${sheetTitle}'!B${startRow}`;
+  // 数值按“亿”
+  const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
+  billionRows.forEach(rIdx => {
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+  });
+  // 总股本（亿，2位小数）
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+  // 价格
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
+  // 合理PE（整数）
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
+  // 增速（%）
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+  // 折扣率（%）
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
 
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-  return { nextRow: end + 2, discountCellA1, judgmentCellA1, nameCellA1 };
+
+  return {
+    nextRow: (startRow + rows.length + 1),
+    discountCellA1: `'${sheetTitle}'!B${r.discount}`,
+    judgmentCellA1: `'${sheetTitle}'!B${r.judgment}`,
+    nameCellA1:     `'${sheetTitle}'!B${r.title}`,
+  };
 }
 
 // ===== 邮件 =====
@@ -514,7 +597,7 @@ async function sendEmailIfEnabled(lines){
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
-    // 读取“判定”字段（该块最后一行B列）
+    // 读取“判定”
     const nikkeiStatusCell = `'${sheetTitle}'!B${end}`;
     res_nikkei.judgment = await readOneCell(nikkeiStatusCell);
 
@@ -549,7 +632,7 @@ async function sendEmailIfEnabled(lines){
   const pe_nifty = nifty_data.peRes;
   const pb_nifty = nifty_data.pbRes;
   if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
-    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned. Exiting with error code 1 to trigger artifact upload.");
+    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned.");
     process.exit(1);
   }
   let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
@@ -564,75 +647,36 @@ async function sendEmailIfEnabled(lines){
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
   row += 2;
 
-  // 9) 腾讯控股
-  const tencentConfig = {
-    label: "腾讯控股",
-    ticker: "HKG:0700",
-    priceFormula: `=GOOGLEFINANCE("HKG:0700", "price")`,
-    totalShares: 9772000000,
-    fairPE: 25,
-    currentProfit: 220000000000,
-    averageProfit: null,
-    growthRate: 0.12,
-    category: "成长股"
-  };
-  const tRes = await writeStockBlock(row, tencentConfig);
-  row = tRes.nextRow;
-  
-  // 10) 贵州茅台（成长股）
-  const moutaiConfig = {
-    label: "贵州茅台",
-    ticker: "SHA:600519",
-    priceFormula: `=getSinaPrice("sh600519")`,
-    totalShares: 1256197800,
-    fairPE: 30,
-    currentProfit: 74753000000,
-    averageProfit: null,
-    growthRate: 0.09,
-    category: "成长股"
-  };
-  const mRes = await writeStockBlock(row, moutaiConfig);
-  row = mRes.nextRow;
-
-  // 11) 分众传媒（周期股：平均净利润=46亿；合理PE=25）
-  const focusMediaConfig = {
-    label: "分众传媒",
-    ticker: "SHE:002027",
-    priceFormula: `=GOOGLEFINANCE("SHE:002027","price")`,
-    totalShares: 13760000000,
-    fairPE: 25,
-    currentProfit: 0,
-    averageProfit: 4600000000,
-    growthRate: 0.00,
-    category: "周期股"
-  };
-  const fRes = await writeStockBlock(row, focusMediaConfig);
-  row = fRes.nextRow;
+  // 循环渲染 STOCKS
+  const stockResults = [];
+  for (const s of STOCKS) {
+    const res = await writeStockBlock(row, s);
+    stockResults.push({ cfg: s, res });
+    row = res.nextRow;
+  }
 
   console.log("[DONE]", todayStr());
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-  // ====== 子公司数值回读（用于邮件展示：折扣率 + 判定）======
-  const tencentDiscount = await readOneCell(tRes.discountCellA1);
-  const tencentJudge    = await readOneCell(tRes.judgmentCellA1);
-  const moutaiDiscount  = await readOneCell(mRes.discountCellA1);
-  const moutaiJudge     = await readOneCell(mRes.judgmentCellA1);
-  const focusDiscount   = await readOneCell(fRes.discountCellA1);
-  const focusJudge      = await readOneCell(fRes.judgmentCellA1);
+  // ====== 回读个股，组装邮件行 ======
+  const stockLines = [];
+  for (const { cfg, res } of stockResults) {
+    const dis = await readOneCell(res.discountCellA1);
+    const jud = await readOneCell(res.judgmentCellA1);
+    stockLines.push(`${cfg.label} 折扣率: ${dis || "-"} → ${jud || "-"}`);
+  }
 
   const lines = [
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
     `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
-    `Nikkei → ${res_nikkei.judgment || "-"}`, // ★ 使用“判定”
+    `Nikkei → ${res_nikkei.judgment || "-"}`,
     `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
     `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
     `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-    `Tencent 折扣率: ${tencentDiscount || "-"} → ${tencentJudge || "-"}`,
-    `贵州茅台 折扣率: ${moutaiDiscount || "-"} → ${moutaiJudge || "-"}`,
-    `分众传媒 折扣率: ${focusDiscount || "-"} → ${focusJudge || "-"}`
+    ...stockLines
   ];
   await sendEmailIfEnabled(lines);
 })();
