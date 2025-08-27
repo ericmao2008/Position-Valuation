@@ -649,22 +649,24 @@ async function sendEmailIfEnabled(lines){
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-  // ====== 组装邮件行 ======
+// ====== 组装邮件行 ======
 const stockLines = [];
 for (const { cfg, res } of stockResults) {
-  const dis = await readOneCell(res.discountCellA1);
-  const jud = await readOneCell(res.judgmentCellA1);
+  const disRaw = await readOneCell(res.discountCellA1);
+  const jud    = await readOneCell(res.judgmentCellA1);
 
+  // 兼容 0.9788 / 97.88 / "97.88%" / 带千分位
   let disPct = "-";
   if (disRaw !== "" && disRaw != null) {
-    const num = Number(disRaw);
-    if (!isNaN(num)) {
-      // 如果是 0~1 的小数（如 0.9788），转为百分比
-      if (num > 0 && num < 1) {
-        disPct = `${(num * 100).toFixed(2)}%`;
+    const s = String(disRaw).trim();
+    const n = Number(s.replace(/%/g, "").replace(/,/g, ""));
+    if (!Number.isNaN(n)) {
+      if (/%$/.test(s)) {
+        disPct = `${n.toFixed(2)}%`;
+      } else if (n > 0 && n < 1) {
+        disPct = `${(n * 100).toFixed(2)}%`;
       } else {
-        // 如果已经是百分数（如 97.88），直接格式化
-        disPct = `${num.toFixed(2)}%`;
+        disPct = `${n.toFixed(2)}%`;
       }
     }
   }
