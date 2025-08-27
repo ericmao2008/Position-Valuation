@@ -13,5 +13,7 @@
     "node-fetch": "^3.3.2",
     "nodemailer": "^7.0.5",
     "playwright": "^1.45.0"
+    "@notionhq/client": "^2.2.14",
+    "其他依赖": "..."
   }
 }
