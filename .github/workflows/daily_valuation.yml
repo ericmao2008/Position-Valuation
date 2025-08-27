@@ -53,6 +53,10 @@ jobs:
       TENCENT_MC_OVERRIDE:      ${{ vars.TENCENT_MC_OVERRIDE }}
       TENCENT_SHARES_OVERRIDE:  ${{ vars.TENCENT_SHARES_OVERRIDE }}
 
+      # ===== Notion =====
+      NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
+      NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
