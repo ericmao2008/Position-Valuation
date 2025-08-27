@@ -654,7 +654,21 @@ const stockLines = [];
 for (const { cfg, res } of stockResults) {
   const dis = await readOneCell(res.discountCellA1);
   const jud = await readOneCell(res.judgmentCellA1);
-  const disPct = dis ? `${(Number(dis)*100).toFixed(2)}%` : "-";
+
+  let disPct = "-";
+  if (disRaw !== "" && disRaw != null) {
+    const num = Number(disRaw);
+    if (!isNaN(num)) {
+      // 如果是 0~1 的小数（如 0.9788），转为百分比
+      if (num > 0 && num < 1) {
+        disPct = `${(num * 100).toFixed(2)}%`;
+      } else {
+        // 如果已经是百分数（如 97.88），直接格式化
+        disPct = `${num.toFixed(2)}%`;
+      }
+    }
+  }
+
   stockLines.push(`${cfg.label} 折扣率: ${disPct} → ${jud || "-"}`);
 }
 
