@@ -369,6 +369,57 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
+// === 统一显示格式：P/E 为小数，其它为百分比（DRY_SHEET 时跳过）===
+if (!DRY_SHEET) {
+  const requests = [];
+
+  // 百分比显示：E/P(3)、r_f(4)、ERP*(5)、δ(6)、ROE(10)、ROE基准(11) 的 B 列
+  for (const idx of [3,4,5,6,10,11]) {
+    const r = (startRow - 1) + (idx - 1);
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type:"NUMBER", pattern:"0.00%" } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+  }
+
+  // 数值两位小数：P/E(2)、买点PE(7)、卖点PE(8)、ROE倍数因子(12) 的 B 列
+  for (const idx of [2,7,8,12]) {
+    const r = (startRow - 1) + (idx - 1);
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type:"NUMBER", pattern:"0.00" } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+  }
+
+  // 合理PE区间（第9行 B 列）改为文本 "0.00 ~ 0.00"
+  const fairRangeText = (peBuy!=null && peSell!=null)
+    ? `${peBuy.toFixed(2)} ~ ${peSell.toFixed(2)}`
+    : "";
+  requests.push({
+    updateCells: {
+      rows: [{ values: [{ userEnteredValue: { stringValue: fairRangeText } }] }],
+      fields: "userEnteredValue",
+      range: { sheetId,
+        startRowIndex:(startRow - 1) + (9 - 1),
+        endRowIndex:  (startRow - 1) + (9),
+        startColumnIndex:1, endColumnIndex:2
+      }
+    }
+  });
+
+  // 一次提交所有格式化请求
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: { requests }
+  });
+}
+   
   return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
@@ -607,18 +658,25 @@ async function runDaily(){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
   }
 
-  // 2) r_f / ERP（并行）
-  const rf_cn_promise = rfCN();
-  const erp_cn_promise = erpCN();
-  const rf_us_promise = rfUS();
-  const erp_us_promise = erpUS();
-  const rf_jp_promise = rfJP();
-  const erp_jp_promise = erpJP();
-  const rf_de_promise = rfDE();
-  const erp_de_promise = erpDE();
-  const nifty_promise  = fetchNifty50();
-  const rf_in_promise  = rfIN();
-  const erp_in_promise = erpIN();
+// 统一的 rf/erp Promise 映射（只初始化一次）
+const rfP = {
+  CN: rfCN(),
+  US: rfUS(),
+  JP: rfJP(),
+  DE: rfDE(),
+  IN: rfIN(),
+};
+const erpP = {
+  CN: erpCN(),
+  US: erpUS(),
+  JP: erpJP(),
+  DE: erpDE(),
+  IN: erpIN(),
+};
+
+// 一个小工具：根据 VC_TARGETS 的 country 取对应 r_f / ERP
+async function getRf(country){ return await rfP[country]; }
+async function getErp(country){ return await erpP[country]; }
 
   // --- "全市场宽基" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
@@ -629,27 +687,41 @@ async function runDaily(){
   row += 2;
 
   // 3) 依次写指数块 —— 使用 vcMap 覆盖（若没有就用 PE_OVERRIDE_*）
-  // SH000300
-  let r_hs = vcMap["SH000300"];
-  let pe_hs = r_hs?.pe ? { v: r_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
-  let roe_hs = r_hs?.roe ? { v: r_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hs = await writeBlock(row, VC_TARGETS.SH000300.label, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
+// HS300
+{
+  const t = VC_TARGETS.SH000300;         // { label:"HS300", country:"CN" }
+  const vc = vcMap["SH000300"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_CN ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ CN 10Y
+  const erpRes = await getErp(t.country);    // ★ CN ERP
+  var res_hs = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_hs.nextRow;
+}
 
-  // SP500
-  let r_sp = vcMap["SP500"];
-  let pe_spx = r_sp?.pe ? { v: r_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
-  let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  const erp_us = await erp_us_promise;
-  let res_sp = await writeBlock(row, VC_TARGETS.SP500.label, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
+ // SPX
+{
+  const t = VC_TARGETS.SP500;            // country: "US"
+  const vc = vcMap["SP500"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_SPX ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ US 10Y
+  const erpRes = await getErp(t.country);    // ★ US ERP
+  var res_sp = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_sp.nextRow;
+}
 
-  // NDX
-  let r_ndx = vcMap["NDX"];
-  let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
-  let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_ndx = await writeBlock(row, VC_TARGETS.NDX.label, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
+// NDX
+{
+  const t = VC_TARGETS.NDX;
+  const vc = vcMap["NDX"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_NDX ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ US 10Y
+  const erpRes = await getErp(t.country);    // ★ US ERP
+  var res_ndx = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_ndx.nextRow;
+}
 
   // Nikkei（公式）
   {
@@ -687,31 +759,53 @@ async function runDaily(){
     var res_nikkei = { judgment: await readOneCell(`'${sheetTitle}'!B${end}`) };
   }
 
-  // China Internet 50
-  let r_cx = vcMap["CSIH30533"];
-  let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
-  let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.label, "CN", pe_cx, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_cx);
+// China Internet 50
+{
+  const t = VC_TARGETS.CSIH30533;
+  const vc = vcMap["CSIH30533"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_CXIN ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ CN 10Y
+  const erpRes = await getErp(t.country);    // ★ CN ERP
+  var res_cx = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_cx.nextRow;
+}
 
-  // HSTECH
-  let r_hst = vcMap["HSTECH"];
-  let pe_hst = r_hst?.pe ? { v: r_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
-  let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.label, "CN", pe_hst, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hst);
+// HSTECH
+{
+  const t = VC_TARGETS.HSTECH;
+  const vc = vcMap["HSTECH"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_HSTECH ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ CN 10Y
+  const erpRes = await getErp(t.country);    // ★ CN ERP
+  var res_hst = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_hst.nextRow;
+}
 
-  // DAX
-  let r_dax = vcMap["GDAXI"];
-  let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
-  let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.label, "DE", pe_dax, await rf_de_promise, (await erp_de_promise).v, "真实", null, roe_dax);
+ // DAX
+{
+  const t = VC_TARGETS.GDAXI;
+  const vc = vcMap["GDAXI"] || {};
+  const peRes = vc.pe  ? { v: vc.pe,  tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v: PE_OVERRIDE_DAX ?? "", tag:"兜底", link:"—" };
+  const roeRes= vc.roe ? { v: vc.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")`} : { v:"", tag:"兜底", link:"—" };
+  const rfRes  = await getRf(t.country);     // ★ DE 10Y
+  const erpRes = await getErp(t.country);    // ★ DE ERP
+  var res_dax = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_dax.nextRow;
+}
 
-  // Nifty 50
-  const nifty_data = await nifty_promise;
-  let res_in = await writeBlock(row, "Nifty 50", "IN", { v: nifty_data.pe, tag:"真实", link:nifty_data.link }, await rf_in_promise, (await erp_in_promise).v, "真实", null, { v: nifty_data.pb ? (nifty_data.pb / nifty_data.pe) : null, tag:"计算值", link:nifty_data.link });
+// Nifty 50
+{
+  const t = { label: "Nifty 50", country: "IN" };
+  const nifty = await fetchNifty50();    // { pe, pb, link }
+  const peRes = { v: nifty.pe || "", tag: nifty.pe ? "真实" : "兜底", link: nifty.link };
+  const roeRes= (nifty.pe && nifty.pb) ? { v: nifty.pb / nifty.pe, tag:"计算值", link: nifty.link } : { v:"", tag:"兜底", link: nifty.link };
+  const rfRes  = await getRf(t.country);     // ★ IN 10Y
+  const erpRes = await getErp(t.country);    // ★ IN ERP
+  var res_in = await writeBlock(row, t.label, t.country, peRes, rfRes, erpRes.v, erpRes.tag, erpRes.link, roeRes);
   row = res_in.nextRow;
+}
 
   // --- "子公司" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
