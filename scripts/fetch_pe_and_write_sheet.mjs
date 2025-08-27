@@ -1,12 +1,13 @@
 /**
  * Version History
- * V5.0.0 - 配置化数组 & 自动价格公式
+ * V5.0.0 - 配置化数组 & 自动价格公式 (+ Notion 同步)
  * - 个股改为 STOCKS 配置数组；主程序循环渲染
  * - 自动根据 ticker 前缀生成价格公式：
  *   * SHA:600519 -> =getSinaPrice("sh600519")
  *   * SHE:002027 -> =GOOGLEFINANCE("SHE:002027","price")
  *   * HKG:0700   -> =GOOGLEFINANCE("HKG:0700","price")
  * - 保留：δ百分比、Nikkei邮件=判定字段、周期股平均净利逻辑、邮件“折扣率+判定”
+ * - 新增：推送关键结果到 Notion 数据库（按 Date + Ticker Upsert）
  */
 
 import fetch from "node-fetch";
@@ -14,6 +15,10 @@ import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import fs from "fs";
 import path from "path";
+// ===== Notion =====
+import { Client as NotionClient } from "@notionhq/client";
+const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
+const NOTION_DB_ASSETS = process.env.NOTION_DB_ASSETS;
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -158,7 +163,7 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP*（与 V4.8 相同）=====
+// ===== r_f / ERP* =====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -490,6 +495,49 @@ async function sendEmailIfEnabled(lines){
   catch(e){ console.error("[MAIL] send error:", e); }
 }
 
+/* =========================
+   Notion 同步（工具函数）
+   ========================= */
+const NP = (n)=> (n==="" || n==null ? { number: null } : { number: Number(n) });
+const Sel = (name)=> name ? { select: { name } } : undefined;
+
+async function findPageByDateTicker(dbId, dateISO, ticker){
+  if(!dbId) return null;
+  const r = await notion.databases.query({
+    database_id: dbId,
+    filter: { and: [
+      { property: "Ticker", rich_text: { equals: String(ticker||"") } },
+      { property: "Date",   date:      { equals: dateISO } }
+    ]},
+    page_size: 1
+  });
+  return r.results?.[0] || null;
+}
+
+async function upsertAssetRow({
+  type, name, ticker, dateISO,
+  pe, pb, roe, judgment,
+  category, price, marketCap,
+  fairValue, buyPoint, sellPoint, discount
+}){
+  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) return; // 未配置则跳过
+  const props = {
+    "Name":      { title: [{ text: { content: name || String(ticker||"") } }] },
+    "Type":      Sel(type || "Index"),
+    "Ticker":    { rich_text: [{ text: { content: String(ticker||"") } }] },
+    "Date":      { date: { start: dateISO } },
+    "PE":        NP(pe),  "PB": NP(pb),  "ROE": NP(roe),
+    "Judgment":  Sel(judgment || ""),
+    "Category":  Sel(category || (type==="Index" ? "Index" : "")),
+    "Price":     NP(price),      "MarketCap": NP(marketCap),
+    "FairValue": NP(fairValue),  "BuyPoint":  NP(buyPoint),
+    "SellPoint": NP(sellPoint),  "Discount":  NP(discount),
+  };
+  const exist = await findPageByDateTicker(NOTION_DB_ASSETS, dateISO, ticker);
+  if (exist) await notion.pages.update({ page_id: exist.id, properties: props });
+  else       await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
+}
+
 // ===== Main =====
 (async()=>{
   console.log("[INFO] Run start", todayStr(), "USE_PLAYWRIGHT=", USE_PW, "TZ=", TZ);
@@ -525,11 +573,18 @@ async function sendEmailIfEnabled(lines){
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
   row += 2;
 
+  // 收集要同步到 Notion 的行
+  const notionRows = [];
+  const isoDate = todayStr();
+
   // 1) HS300
   let r_hs = vcMap["SH000300"];
   let pe_hs = r_hs?.pe ? { v: r_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   let roe_hs = r_hs?.roe ? { v: r_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_hs = await writeBlock(row, VC_TARGETS.SH000300.name, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
+  // 推送（PB 估算）
+  notionRows.push({ type:"Index", name:"沪深300", ticker:"HS300", dateISO: isoDate,
+    pe: res_hs.pe, pb: (res_hs.roe && res_hs.pe)? res_hs.pe*res_hs.roe:"", roe: res_hs.roe, judgment: res_hs.judgment });
   row = res_hs.nextRow;
 
   // 2) SP500
@@ -538,6 +593,8 @@ async function sendEmailIfEnabled(lines){
   let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   const erp_us = await erp_us_promise;
   let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
+  notionRows.push({ type:"Index", name:"S&P 500", ticker:"^GSPC", dateISO: isoDate,
+    pe: res_sp.pe, pb: (res_sp.roe && res_sp.pe)? res_sp.pe*res_sp.roe:"", roe: res_sp.roe, judgment: res_sp.judgment });
   row = res_sp.nextRow;
   
   // 3) 纳指100
@@ -545,9 +602,11 @@ async function sendEmailIfEnabled(lines){
   let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
   let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
+  notionRows.push({ type:"Index", name:"Nasdaq 100", ticker:"^NDX", dateISO: isoDate,
+    pe: res_ndx.pe, pb: (res_ndx.roe && res_ndx.pe)? res_ndx.pe*res_ndx.roe:"", roe: res_ndx.roe, judgment: res_ndx.judgment });
   row = res_ndx.nextRow;
 
-  // 4) Nikkei（公式块：读取判定用于邮件）
+  // 4) Nikkei（公式块：读取判定用于邮件 & Notion）
   let res_nikkei = { judgment: "-" };
   {
     const startRow = row;
@@ -601,6 +660,13 @@ async function sendEmailIfEnabled(lines){
     const nikkeiStatusCell = `'${sheetTitle}'!B${end}`;
     res_nikkei.judgment = await readOneCell(nikkeiStatusCell);
 
+    // 回读 PE/PB/ROE（B列）
+    const nikkeiPE  = await readOneCell(`'${sheetTitle}'!B${peRow}`);
+    const nikkeiPB  = await readOneCell(`'${sheetTitle}'!B${pbRow}`);
+    const nikkeiROE = await readOneCell(`'${sheetTitle}'!B${roeRow}`);
+    notionRows.push({ type:"Index", name:"Nikkei 225", ticker:"^N225", dateISO: isoDate,
+      pe: nikkeiPE || "", pb: nikkeiPB || "", roe: nikkeiROE || "", judgment: res_nikkei.judgment });
+
     row = end + 2;
   }
 
@@ -610,6 +676,8 @@ async function sendEmailIfEnabled(lines){
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
+  notionRows.push({ type:"Index", name:"China Internet 50", ticker:"CSIH30533", dateISO: isoDate,
+    pe: res_cx.pe, pb: (res_cx.roe && res_cx.pe)? res_cx.pe*res_cx.roe:"", roe: res_cx.roe, judgment: res_cx.judgment });
   row = res_cx.nextRow;
 
   // 6) 恒生科技
@@ -617,6 +685,8 @@ async function sendEmailIfEnabled(lines){
   let pe_hst = r_hst?.pe ? { v: r_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, "CN", pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
+  notionRows.push({ type:"Index", name:"HSTECH", ticker:"HSTECH", dateISO: isoDate,
+    pe: res_hst.pe, pb: (res_hst.roe && res_hst.pe)? res_hst.pe*res_hst.roe:"", roe: res_hst.roe, judgment: res_hst.judgment });
   row = res_hst.nextRow;
 
   // 7) 德国DAX
@@ -625,6 +695,8 @@ async function sendEmailIfEnabled(lines){
   let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
   let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
+  notionRows.push({ type:"Index", name:"DAX", ticker:"^GDAXI", dateISO: isoDate,
+    pe: res_dax.pe, pb: (res_dax.roe && res_dax.pe)? res_dax.pe*res_dax.roe:"", roe: res_dax.roe, judgment: res_dax.judgment });
   row = res_dax.nextRow;
 
   // 8) Nifty 50
@@ -639,6 +711,9 @@ async function sendEmailIfEnabled(lines){
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
+  notionRows.push({ type:"Index", name:"Nifty 50", ticker:"^NSEI", dateISO: isoDate,
+    pe: pe_nifty?.v ?? res_in.pe ?? "", pb: pb_nifty?.v ?? ((res_in.roe && res_in.pe)? res_in.pe*res_in.roe:""),
+    roe: res_in.roe ?? ((pe_nifty?.v && pb_nifty?.v) ? pb_nifty.v/pe_nifty.v : ""), judgment: res_in.judgment });
   row = res_in.nextRow;
   
   // --- "子公司" Title ---
@@ -659,14 +734,23 @@ async function sendEmailIfEnabled(lines){
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-  // ====== 回读个股，组装邮件行 ======
+  // ====== 回读个股，组装邮件行 + Notion ======
   const stockLines = [];
   for (const { cfg, res } of stockResults) {
     const dis = await readOneCell(res.discountCellA1);
     const jud = await readOneCell(res.judgmentCellA1);
     stockLines.push(`${cfg.label} 折扣率: ${dis || "-"} → ${jud || "-"}`);
+    notionRows.push({ type:"Stock", name: cfg.label, ticker: cfg.ticker, dateISO: isoDate,
+      pe: cfg.fairPE, discount: (dis? Number(dis):""), judgment: jud, category: cfg.category });
   }
 
+  // —— 推送到 Notion（顺序await最稳；如需加速可分批 Promise.all） ——
+  for (const rowObj of notionRows) {
+    try { await upsertAssetRow(rowObj); }
+    catch(e){ console.error("[Notion] upsert error:", e?.message || e); }
+  }
+
+  // ====== 邮件 ======
   const lines = [
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
