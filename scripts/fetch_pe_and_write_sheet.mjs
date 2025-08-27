@@ -1,13 +1,9 @@
 /**
  * Version History
- * V5.0.0 - 配置化数组 & 自动价格公式 (+ Notion 同步)
- * - 个股改为 STOCKS 配置数组；主程序循环渲染
- * - 自动根据 ticker 前缀生成价格公式：
- *   * SHA:600519 -> =getSinaPrice("sh600519")
- *   * SHE:002027 -> =GOOGLEFINANCE("SHE:002027","price")
- *   * HKG:0700   -> =GOOGLEFINANCE("HKG:0700","price")
- * - 保留：δ百分比、Nikkei邮件=判定字段、周期股平均净利逻辑、邮件“折扣率+判定”
- * - 新增：推送关键结果到 Notion 数据库（按 Date + Ticker Upsert）
+ * V5.1.0 - Notion极简同步（Name/Valuation/AssetType/Category/[Date]）
+ * - 仅把类似邮件的单行摘要写入 Notion
+ * - 字段映射：Name, Valuation, AssetType, Category, (可选)Date
+ * - 其它估值/Sheet/邮件逻辑保持 V5.0
  */
 
 import fetch from "node-fetch";
@@ -15,10 +11,75 @@ import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import fs from "fs";
 import path from "path";
-// ===== Notion =====
+
+// ===== Notion（极简同步）=====
 import { Client as NotionClient } from "@notionhq/client";
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const NOTION_DB_ASSETS = process.env.NOTION_DB_ASSETS;
+
+// 与 Notion 数据库列名一一对应（若你改名，改这里即可）
+const PROP_SIMPLE = {
+  Name: "Name",
+  Valuation: "Valuation",
+  AssetType: "AssetType",
+  Category: "Category",
+  Date: "Date",         // 可选：库里没有也能跑
+};
+
+// 缓存数据库可用列，避免 property_not_found
+let DB_PROPS = new Set();
+async function notionSelfTest(){
+  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) return;
+  try {
+    const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
+    DB_PROPS = new Set(Object.keys(db.properties));
+    console.log("[Notion] DB title:", db.title?.[0]?.plain_text);
+    console.log("[Notion] Props:", [...DB_PROPS].join(", "));
+  } catch(e) {
+    console.error("[Notion] DB retrieve failed:", e?.message || e);
+  }
+}
+const Sel = (name)=> name ? { select: { name } } : undefined;
+function setIfExists(props, key, value){
+  if (key && DB_PROPS.has(key) && value !== undefined) props[key] = value;
+}
+// Name + Date 唯一（若无 Date 列，每次新增）
+async function findPageByNameDate(dbId, name, dateISO){
+  if (!DB_PROPS.has(PROP_SIMPLE.Date)) return null;
+  const r = await notion.databases.query({
+    database_id: dbId,
+    filter: { and: [
+      { property: PROP_SIMPLE.Name, title: { equals: String(name) } },
+      { property: PROP_SIMPLE.Date, date:  { equals: dateISO } }
+    ]},
+    page_size: 1
+  });
+  return r.results?.[0] || null;
+}
+async function upsertSimpleRow({ name, valuation, assetType, category, dateISO }){
+  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) { 
+    console.log("[Notion] skip: env not set"); return;
+  }
+  const props = {};
+  props[PROP_SIMPLE.Name] = { title: [{ text: { content: name } }] };
+  props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
+  setIfExists(props, PROP_SIMPLE.AssetType, Sel(assetType));
+  setIfExists(props, PROP_SIMPLE.Category, Sel(category));
+  setIfExists(props, PROP_SIMPLE.Date, dateISO ? { date: { start: dateISO } } : undefined);
+
+  try {
+    const exist = await findPageByNameDate(NOTION_DB_ASSETS, name, dateISO);
+    if (exist) {
+      await notion.pages.update({ page_id: exist.id, properties: props });
+      console.log(`[Notion] updated: ${name}`);
+    } else {
+      await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
+      console.log(`[Notion] created: ${name}`);
+    }
+  } catch(e){
+    console.error("[Notion] upsertSimple error:", e?.message || e);
+  }
+}
 
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
@@ -163,7 +224,7 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f / ERP* =====
+// ===== r_f / ERP*（与 V4.8 相同）=====
 async function rfCN(){ try{
   const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
   const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
@@ -210,29 +271,7 @@ async function rfIN(){ try{
     if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","IN 10Y")` };
   }}catch{} return { v:RF_IN, tag:"兜底", link:"—" }; }
 
-async function erpFromDamodaran(re){
-  try{
-    const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
-    const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
-    if(r.ok){
-      const h = await r.text();
-      const rows = h.split("</tr>");
-      const row  = rows.find(x => re.test(x)) || "";
-      const plain = row.replace(/<[^>]+>/g," ");
-      const nums = [...plain.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
-      const v = nums.find(x=>x>2 && x<10);
-      if(v!=null) return { v:v/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran")` };
-    }
-  }catch{}
-  return null;
-}
-async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-
-// ===== Nifty 50 =====
+// ===== Nifty 50（Playwright）=====
 async function fetchNifty50(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -300,16 +339,12 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
   const requests = [];
-  // 百分比
   [3,4,5,6,10,11].forEach(i=>{ const r=(startRow-1)+i-1;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  // 数值
   [2,7,8,12].forEach(i=>{ const r=(startRow-1)+i-1;
     requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
       cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-
-  // Header + 边框
   requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:startRow, startColumnIndex:0, endColumnIndex:5 },
     cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } }, fields:"userEnteredFormat(backgroundColor,textFormat)" }});
   requests.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
@@ -319,84 +354,37 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
     right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
-  return { nextRow: end + 2, judgment: status, pe, roe };
+  return { nextRow: end + 2, judgment: status, pe, roe, peBuy, peSell };
 }
 
 /* =========================
    配置化：个股数组 + 类别规则
    ========================= */
-
-// 1) 个股配置（只改这里即可）
 const STOCKS = [
-  {
-    label: "腾讯控股",
-    ticker: "HKG:0700",
-    totalShares: 9772000000,
-    fairPE: 25,
-    currentProfit: 220000000000,
-    averageProfit: null,
-    growthRate: 0.12,
-    category: "成长股"
-  },
-  {
-    label: "贵州茅台",
-    ticker: "SHA:600519",
-    totalShares: 1256197800,
-    fairPE: 30,
-    currentProfit: 74753000000,
-    averageProfit: null,
-    growthRate: 0.09,
-    category: "成长股"
-  },
-  {
-    label: "分众传媒",
-    ticker: "SHE:002027",
-    totalShares: 13760000000,
-    fairPE: 25,
-    currentProfit: 0,
-    averageProfit: 4600000000, // 46亿
-    growthRate: 0.00,
-    category: "周期股"
-  },
+  { label:"腾讯控股", ticker:"HKG:0700", totalShares:9772000000, fairPE:25, currentProfit:220000000000, averageProfit:null, growthRate:0.12, category:"成长股" },
+  { label:"贵州茅台", ticker:"SHA:600519", totalShares:1256197800, fairPE:30, currentProfit:74753000000, averageProfit:null, growthRate:0.09, category:"成长股" },
+  { label:"分众传媒", ticker:"SHE:002027", totalShares:13760000000, fairPE:25, currentProfit:0, averageProfit:4600000000, growthRate:0.00, category:"周期股" },
 ];
 
-// 2) 根据 ticker 生成价格公式（可被显式 priceFormula 覆盖）
 function priceFormulaFromTicker(ticker){
   const [ex, code] = String(ticker||"").split(":");
   if(!ex || !code) return "";
   if(ex === "SHA") return `=getSinaPrice("sh${code}")`;
   if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;
-  return `=GOOGLEFINANCE("${ex}:${code}","price")`; // HKG/NYSE/NASDAQ 等
+  return `=GOOGLEFINANCE("${ex}:${code}","price")`;
 }
 
-// 3) 类别→估值规则
 const CATEGORY_RULES = {
-  "周期股": (r) => ({
-    fairVal: `=B${r.avgProfit}*B${r.fairPE}`,
-    buy:     `=B${r.fairVal}*0.7`,
-    sell:    `=B${r.fairVal}*1.5`,
-    require: ["avgProfit"]
-  }),
-  "成长股": (r) => ({
-    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
-    buy:     `=MIN(B${r.fairVal}*0.7, (B${r.futureProfit}*B${r.fairPE})/2)`,
-    sell:    `=MAX(B${r.currentProfit}*50, B${r.futureProfit}*B${r.fairPE}*1.5)`,
-    require: ["currentProfit"]
-  }),
-  "价值股": (r) => ({
-    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
-    buy:     `=MIN(B${r.fairVal}*0.7, (B${r.futureProfit}*B${r.fairPE})/2)`,
-    sell:    `=MAX(B${r.currentProfit}*50, B${r.futureProfit}*B${r.fairPE}*1.5)`,
-    require: ["currentProfit"]
-  }),
+  "周期股": (r) => ({ fairVal:`=B${r.avgProfit}*B${r.fairPE}`, buy:`=B${r.fairVal}*0.7`, sell:`=B${r.fairVal}*1.5`, require:["avgProfit"] }),
+  "成长股": (r) => ({ fairVal:`=B${r.currentProfit}*B${r.fairPE}`, buy:`=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`, sell:`=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`, require:["currentProfit"] }),
+  "价值股": (r) => ({ fairVal:`=B${r.currentProfit}*B${r.fairPE}`, buy:`=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`, sell:`=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`, require:["currentProfit"] }),
 };
 
-// ===== 个股写块（引用类别规则 & 自动价格公式） =====
+// ===== 个股写块 =====
 async function writeStockBlock(startRow, cfg) {
   const { sheetTitle, sheetId } = await ensureToday();
   const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category } = cfg;
   const priceFormula = cfg.priceFormula ?? priceFormulaFromTicker(ticker);
-
   const rule = CATEGORY_RULES[category];
   if(!rule) throw new Error(`未知类别: ${category}`);
   if(rule.require){
@@ -405,25 +393,12 @@ async function writeStockBlock(startRow, cfg) {
       if(need==="currentProfit" && !(currentProfit>0)) throw new Error(`[${label}] ${category} 必须提供 currentProfit`);
     }
   }
-
   const E8 = 100000000;
-  // 行映射
   const r = {
-    title:         startRow,
-    price:         startRow + 1,
-    mc:            startRow + 2,
-    shares:        startRow + 3,
-    fairPE:        startRow + 4,
-    currentProfit: startRow + 5,
-    avgProfit:     startRow + 6,
-    futureProfit:  startRow + 7,
-    fairVal:       startRow + 8,
-    discount:      startRow + 9,
-    buy:           startRow + 10,
-    sell:          startRow + 11,
-    category:      startRow + 12,
-    growth:        startRow + 13,
-    judgment:      startRow + 14,
+    title:startRow, price:startRow+1, mc:startRow+2, shares:startRow+3, fairPE:startRow+4,
+    currentProfit:startRow+5, avgProfit:startRow+6, futureProfit:startRow+7,
+    fairVal:startRow+8, discount:startRow+9, buy:startRow+10, sell:startRow+11,
+    category:startRow+12, growth:startRow+13, judgment:startRow+14,
   };
   const f = rule(r);
 
@@ -446,28 +421,16 @@ async function writeStockBlock(startRow, cfg) {
   ];
   await write(`'${sheetTitle}'!A${startRow}:E${startRow + rows.length - 1}`, rows);
 
-  // 样式（保持你原先格式）
   const requests = [];
-  // Header + 边框
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-  requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-
-  // 数值按“亿”
+  requests.push({ repeatCell: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
+  requests.push({ updateBorders: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
   const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
-  billionRows.forEach(rIdx => {
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-  });
-  // 总股本（亿，2位小数）
+  billionRows.forEach(rIdx => { requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } }); });
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 价格
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 合理PE（整数）
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 增速（%）
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-  // 折扣率（%）
   requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
   return {
@@ -495,49 +458,6 @@ async function sendEmailIfEnabled(lines){
   catch(e){ console.error("[MAIL] send error:", e); }
 }
 
-/* =========================
-   Notion 同步（工具函数）
-   ========================= */
-const NP = (n)=> (n==="" || n==null ? { number: null } : { number: Number(n) });
-const Sel = (name)=> name ? { select: { name } } : undefined;
-
-async function findPageByDateTicker(dbId, dateISO, ticker){
-  if(!dbId) return null;
-  const r = await notion.databases.query({
-    database_id: dbId,
-    filter: { and: [
-      { property: "Ticker", rich_text: { equals: String(ticker||"") } },
-      { property: "Date",   date:      { equals: dateISO } }
-    ]},
-    page_size: 1
-  });
-  return r.results?.[0] || null;
-}
-
-async function upsertAssetRow({
-  type, name, ticker, dateISO,
-  pe, pb, roe, judgment,
-  category, price, marketCap,
-  fairValue, buyPoint, sellPoint, discount
-}){
-  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) return; // 未配置则跳过
-  const props = {
-    "Name":      { title: [{ text: { content: name || String(ticker||"") } }] },
-    "Type":      Sel(type || "Index"),
-    "Ticker":    { rich_text: [{ text: { content: String(ticker||"") } }] },
-    "Date":      { date: { start: dateISO } },
-    "PE":        NP(pe),  "PB": NP(pb),  "ROE": NP(roe),
-    "Judgment":  Sel(judgment || ""),
-    "Category":  Sel(category || (type==="Index" ? "Index" : "")),
-    "Price":     NP(price),      "MarketCap": NP(marketCap),
-    "FairValue": NP(fairValue),  "BuyPoint":  NP(buyPoint),
-    "SellPoint": NP(sellPoint),  "Discount":  NP(discount),
-  };
-  const exist = await findPageByDateTicker(NOTION_DB_ASSETS, dateISO, ticker);
-  if (exist) await notion.pages.update({ page_id: exist.id, properties: props });
-  else       await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
-}
-
 // ===== Main =====
 (async()=>{
   console.log("[INFO] Run start", todayStr(), "USE_PLAYWRIGHT=", USE_PW, "TZ=", TZ);
@@ -545,6 +465,9 @@ async function upsertAssetRow({
   let row=1;
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
+
+  // Notion 自检（记录可用列，避免 property_not_found）
+  await notionSelfTest();
 
   let vcMap = {};
   if (USE_PW) {
@@ -573,18 +496,11 @@ async function upsertAssetRow({
   await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
   row += 2;
 
-  // 收集要同步到 Notion 的行
-  const notionRows = [];
-  const isoDate = todayStr();
-
   // 1) HS300
   let r_hs = vcMap["SH000300"];
   let pe_hs = r_hs?.pe ? { v: r_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   let roe_hs = r_hs?.roe ? { v: r_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_hs = await writeBlock(row, VC_TARGETS.SH000300.name, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
-  // 推送（PB 估算）
-  notionRows.push({ type:"Index", name:"沪深300", ticker:"HS300", dateISO: isoDate,
-    pe: res_hs.pe, pb: (res_hs.roe && res_hs.pe)? res_hs.pe*res_hs.roe:"", roe: res_hs.roe, judgment: res_hs.judgment });
   row = res_hs.nextRow;
 
   // 2) SP500
@@ -593,8 +509,6 @@ async function upsertAssetRow({
   let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   const erp_us = await erp_us_promise;
   let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
-  notionRows.push({ type:"Index", name:"S&P 500", ticker:"^GSPC", dateISO: isoDate,
-    pe: res_sp.pe, pb: (res_sp.roe && res_sp.pe)? res_sp.pe*res_sp.roe:"", roe: res_sp.roe, judgment: res_sp.judgment });
   row = res_sp.nextRow;
   
   // 3) 纳指100
@@ -602,11 +516,9 @@ async function upsertAssetRow({
   let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
   let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
-  notionRows.push({ type:"Index", name:"Nasdaq 100", ticker:"^NDX", dateISO: isoDate,
-    pe: res_ndx.pe, pb: (res_ndx.roe && res_ndx.pe)? res_ndx.pe*res_ndx.roe:"", roe: res_ndx.roe, judgment: res_ndx.judgment });
   row = res_ndx.nextRow;
 
-  // 4) Nikkei（公式块：读取判定用于邮件 & Notion）
+  // 4) Nikkei（公式块）
   let res_nikkei = { judgment: "-" };
   {
     const startRow = row;
@@ -644,7 +556,6 @@ async function upsertAssetRow({
     ];
     const end = startRow + nikkei_rows.length - 1;
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
-    
     const requests = [];
     [4,5,6,7,11,12].forEach(i => { const r = (startRow - 1) + (i - 1);
       requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
@@ -656,17 +567,8 @@ async function upsertAssetRow({
     requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
 
-    // 读取“判定”
     const nikkeiStatusCell = `'${sheetTitle}'!B${end}`;
     res_nikkei.judgment = await readOneCell(nikkeiStatusCell);
-
-    // 回读 PE/PB/ROE（B列）
-    const nikkeiPE  = await readOneCell(`'${sheetTitle}'!B${peRow}`);
-    const nikkeiPB  = await readOneCell(`'${sheetTitle}'!B${pbRow}`);
-    const nikkeiROE = await readOneCell(`'${sheetTitle}'!B${roeRow}`);
-    notionRows.push({ type:"Index", name:"Nikkei 225", ticker:"^N225", dateISO: isoDate,
-      pe: nikkeiPE || "", pb: nikkeiPB || "", roe: nikkeiROE || "", judgment: res_nikkei.judgment });
-
     row = end + 2;
   }
 
@@ -676,8 +578,6 @@ async function upsertAssetRow({
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
-  notionRows.push({ type:"Index", name:"China Internet 50", ticker:"CSIH30533", dateISO: isoDate,
-    pe: res_cx.pe, pb: (res_cx.roe && res_cx.pe)? res_cx.pe*res_cx.roe:"", roe: res_cx.roe, judgment: res_cx.judgment });
   row = res_cx.nextRow;
 
   // 6) 恒生科技
@@ -685,8 +585,6 @@ async function upsertAssetRow({
   let pe_hst = r_hst?.pe ? { v: r_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, "CN", pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
-  notionRows.push({ type:"Index", name:"HSTECH", ticker:"HSTECH", dateISO: isoDate,
-    pe: res_hst.pe, pb: (res_hst.roe && res_hst.pe)? res_hst.pe*res_hst.roe:"", roe: res_hst.roe, judgment: res_hst.judgment });
   row = res_hst.nextRow;
 
   // 7) 德国DAX
@@ -695,8 +593,6 @@ async function upsertAssetRow({
   let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
   let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
-  notionRows.push({ type:"Index", name:"DAX", ticker:"^GDAXI", dateISO: isoDate,
-    pe: res_dax.pe, pb: (res_dax.roe && res_dax.pe)? res_dax.pe*res_dax.roe:"", roe: res_dax.roe, judgment: res_dax.judgment });
   row = res_dax.nextRow;
 
   // 8) Nifty 50
@@ -711,9 +607,6 @@ async function upsertAssetRow({
   if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
   const erp_in = await erp_in_promise;
   let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
-  notionRows.push({ type:"Index", name:"Nifty 50", ticker:"^NSEI", dateISO: isoDate,
-    pe: pe_nifty?.v ?? res_in.pe ?? "", pb: pb_nifty?.v ?? ((res_in.roe && res_in.pe)? res_in.pe*res_in.roe:""),
-    roe: res_in.roe ?? ((pe_nifty?.v && pb_nifty?.v) ? pb_nifty.v/pe_nifty.v : ""), judgment: res_in.judgment });
   row = res_in.nextRow;
   
   // --- "子公司" Title ---
@@ -734,23 +627,15 @@ async function upsertAssetRow({
   
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-  // ====== 回读个股，组装邮件行 + Notion ======
+  // ====== 组装邮件行 ======
   const stockLines = [];
   for (const { cfg, res } of stockResults) {
     const dis = await readOneCell(res.discountCellA1);
     const jud = await readOneCell(res.judgmentCellA1);
-    stockLines.push(`${cfg.label} 折扣率: ${dis || "-"} → ${jud || "-"}`);
-    notionRows.push({ type:"Stock", name: cfg.label, ticker: cfg.ticker, dateISO: isoDate,
-      pe: cfg.fairPE, discount: (dis? Number(dis):""), judgment: jud, category: cfg.category });
+    const disPct = dis ? `${(Number(dis)*100).toFixed(2)}%` : "-";
+    stockLines.push(`${cfg.label} 折扣率: ${disPct} → ${jud || "-"}`);
   }
 
-  // —— 推送到 Notion（顺序await最稳；如需加速可分批 Promise.all） ——
-  for (const rowObj of notionRows) {
-    try { await upsertAssetRow(rowObj); }
-    catch(e){ console.error("[Notion] upsert error:", e?.message || e); }
-  }
-
-  // ====== 邮件 ======
   const lines = [
     `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
     `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
@@ -762,5 +647,34 @@ async function upsertAssetRow({
     `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
     ...stockLines
   ];
+
+  // ====== 写入 Notion（极简摘要：Valuation 文案） ======
+  const isoDate = todayStr(); // 若库里无 Date 列，仍可正常写
+  const simpleRows = [
+    { name:"沪深300",     valuation: lines[0], assetType:"指数", category:"宽基指数" },
+    { name:"S&P 500",     valuation: lines[1], assetType:"指数", category:"宽基指数" },
+    { name:"Nasdaq 100",  valuation: lines[2], assetType:"指数", category:"宽基指数" },
+    { name:"Nikkei 225",  valuation: lines[3], assetType:"指数", category:"宽基指数" },
+    { name:"China Internet 50", valuation: lines[4], assetType:"指数", category:"行业指数" },
+    { name:"HSTECH",      valuation: lines[5], assetType:"指数", category:"行业指数" },
+    { name:"DAX",         valuation: lines[6], assetType:"指数", category:"宽基指数" },
+    { name:"Nifty 50",    valuation: lines[7], assetType:"指数", category:"宽基指数" },
+  ];
+  // 个股
+  for (let i = 0; i < stockResults.length; i++) {
+    const { cfg } = stockResults[i];
+    const line = lines[8 + i]; // 紧接指数之后
+    simpleRows.push({
+      name: cfg.label,
+      valuation: line,
+      assetType: "个股",
+      category: cfg.category || "成长股",
+    });
+  }
+  for (const r of simpleRows) {
+    await upsertSimpleRow({ name: r.name, valuation: r.valuation, assetType: r.assetType, category: r.category, dateISO: isoDate });
+  }
+
+  // ====== 邮件 ======
   await sendEmailIfEnabled(lines);
 })();
