@@ -7,7 +7,6 @@
  * - 其它估值、写表、邮件逻辑延续现有版本
  */
 
-import 'dotenv/config';
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
