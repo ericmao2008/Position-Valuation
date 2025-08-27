@@ -16,6 +16,10 @@ import { Client as NotionClient } from "@notionhq/client";
 const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
 const NOTION_DB_ASSETS = process.env.NOTION_DB_ASSETS;
 
+// 你的 Summary 页面（dashboard 卡片）的 page_id
+// 建议放到 GitHub Secrets/Variables 里，名字：NOTION_SUMMARY_PAGE_ID
+const NOTION_SUMMARY_PAGE_ID = process.env.NOTION_SUMMARY_PAGE_ID;
+
 // 与 Notion 数据库列名一一对应（若你改名，改这里即可）
 const PROP_SIMPLE = {
   Name: "Name",
@@ -23,6 +27,8 @@ const PROP_SIMPLE = {
   AssetType: "AssetType",
   Category: "Category",
   Date: "Date", // 可选：库里没有也能跑
+  // 新增：如果你的库里有 Summary 关系列（Relation → 指向 Summary 数据库）
+  Summary: "Summary"
 };
 
 // 缓存数据库可用列，避免 property_not_found
