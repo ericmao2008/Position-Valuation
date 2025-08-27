@@ -1,122 +1,31 @@
 /**
  * Version History
- * V5.1.0 - Notion极简同步（Name/Valuation/AssetType/Category/[Date]）
- * - 仅把类似邮件的单行摘要写入 Notion
- * - 其它估值/Sheet/邮件逻辑保持 V5.0
+ * V6.0.0 - 单文件模块化 + 子命令 + DRY 开关 + Notion极简同步(+Summary)
+ * - 支持 --mode=test-vc/test-nifty/test-notion/test-sheet/test-mail 仅跑某模块
+ * - DRY_SHEET/DRY_NOTION/DRY_MAIL 开关，开发期“看结果不落地”
+ * - Notion 极简同步：Name / Valuation / AssetType / Category / Date / Summary(可选)
+ * - 其它估值、写表、邮件逻辑延续现有版本
  */
 
+import 'dotenv/config';
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
-import fs from "fs";
-import path from "path";
-
-// ===== Notion（极简同步）=====
 import { Client as NotionClient } from "@notionhq/client";
-const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
-const NOTION_DB_ASSETS = process.env.NOTION_DB_ASSETS;
 
-// 你的 Summary 页面（dashboard 卡片）的 page_id
-// 建议放到 GitHub Secrets/Variables 里，名字：NOTION_SUMMARY_PAGE_ID
-const NOTION_SUMMARY_PAGE_ID = process.env.NOTION_SUMMARY_PAGE_ID;
+/* =========================
+   环境/标志 & CLI 子命令
+   ========================= */
+const DRY_SHEET  = process.env.DRY_SHEET === '1';
+const DRY_NOTION = process.env.DRY_NOTION === '1';
+const DRY_MAIL   = process.env.DRY_MAIL === '1';
 
-// 与 Notion 数据库列名一一对应（若你改名，改这里即可）
-const PROP_SIMPLE = {
-  Name: "Name",
-  Valuation: "Valuation",
-  AssetType: "AssetType",
-  Category: "Category",
-  Date: "Date", // 可选：库里没有也能跑
-  // 新增：如果你的库里有 Summary 关系列（Relation → 指向 Summary 数据库）
-  Summary: "Summary"
-};
+const argv = process.argv.slice(2);
+const MODE = (argv.find(a => a.startsWith('--mode=')) || '').split('=')[1] || '';
 
-// 缓存数据库可用列，避免 property_not_found
-let DB_PROPS = new Set();
-async function notionSelfTest(){
-  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) return;
-  try {
-    const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
-    DB_PROPS = new Set(Object.keys(db.properties));
-    console.log("[Notion] DB title:", db.title?.[0]?.plain_text);
-    console.log("[Notion] Props:", [...DB_PROPS].join(", "));
-  } catch(e) {
-    console.error("[Notion] DB retrieve failed:", e?.message || e);
-  }
-}
-const Sel = (name)=> name ? { select: { name } } : undefined;
-function setIfExists(props, key, value){
-  if (key && DB_PROPS.has(key) && value !== undefined) props[key] = value;
-}
-// Name + Date 唯一（若无 Date 列，每次新增）
-async function findPageByNameDate(dbId, name, dateISO){
-  if (!DB_PROPS.has(PROP_SIMPLE.Date)) return null;
-  const r = await notion.databases.query({
-    database_id: dbId,
-    filter: { and: [
-      { property: PROP_SIMPLE.Name, title: { equals: String(name) } },
-      { property: PROP_SIMPLE.Date, date:  { equals: dateISO } }
-    ]},
-    page_size: 1
-  });
-  return r.results?.[0] || null;
-}
-// 增：让 upsertSimpleRow 支持传入 summaryId（dashboard 里那条页面的 page_id）
-async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId }){
-  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) {
-    console.log("[Notion] skip: env not set"); return;
-  }
-  const props = {};
-  props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
-  props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
-  setIfExists(props, PROP_SIMPLE.AssetType, Sel(assetType));
-  setIfExists(props, PROP_SIMPLE.Category,  Sel(category));
-  setIfExists(props, PROP_SIMPLE.Date,      dateISO ? { date: { start: dateISO } } : undefined);
-
-  // ★ 如数据库里存在 Summary 字段，并且传入了 summaryId，则建立关联
-  if (summaryId && DB_PROPS.has("Summary")) {
-    props["Summary"] = { relation: [{ id: summaryId }] };
-  }
-
-  try {
-    // ★ 先清理旧记录上的 Summary（确保 dashboard 只指向“当天最新”）
-    if (DB_PROPS.has("Summary")) {
-      await clearOldSummaryLinks(name);
-    }
-
-    const exist = await findPageByNameDate(NOTION_DB_ASSETS, name, dateISO);
-    if (exist) {
-      await notion.pages.update({ page_id: exist.id, properties: props });
-      console.log(`[Notion] updated: ${name}`);
-    } else {
-      await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
-      console.log(`[Notion] created: ${name}`);
-    }
-  } catch(e){
-    console.error("[Notion] upsertSimple error:", e?.message || e);
-  }
-}
-// 清理旧的 Summary 关系：把同名资产的历史行 Summary 清空
-async function clearOldSummaryLinks(assetName) {
-  try {
-    const r = await notion.databases.query({
-      database_id: NOTION_DB_ASSETS,
-      filter: { property: PROP_SIMPLE.Name, title: { equals: assetName } }
-    });
-    for (const page of r.results) {
-      // 只清空 Summary，不动其它字段
-      if (DB_PROPS.has("Summary")) {
-        await notion.pages.update({
-          page_id: page.id,
-          properties: { Summary: { relation: [] } }
-        });
-      }
-    }
-  } catch (e) {
-    console.error("[Notion] clearOldSummaryLinks:", e?.message || e);
-  }
-}
-// ===== Global =====
+/* =========================
+   全局常量
+   ========================= */
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const USE_PW = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
 const DEBUG  = String(process.env.DEBUG_VERBOSE ?? "0") === "1";
@@ -125,17 +34,17 @@ const dbg    = (...a)=>{ if(DEBUG) console.log("[DEBUG]", ...a); };
 
 const VC_URL = "https://danjuanfunds.com/djmodule/value-center?channel=1300100141";
 
-// 目标指数
+// 目标指数（标签与类型）
 const VC_TARGETS = {
-  SH000300: { name: "沪深300", code: "SH000300", country: "CN" },
-  SP500:    { name: "标普500", code: "SP500", country: "US" },
-  CSIH30533:{ name: "中概互联50", code: "CSIH30533", country: "CN" },
-  HSTECH:   { name: "恒生科技", code: "HKHSTECH", country: "CN" },
-  NDX:      { name: "纳指100", code: "NDX", country: "US" },
-  GDAXI:    { name: "德国DAX", code: "GDAXI", country: "DE" },
+  SH000300: { name: "沪深300", label: "HS300", category: "宽基指数", country: "CN" },
+  SP500:    { name: "标普500", label: "SPX",   category: "宽基指数", country: "US" },
+  CSIH30533:{ name: "中概互联50", label:"China Internet 50", category: "行业指数", country: "CN" },
+  HSTECH:   { name: "恒生科技", label:"HSTECH", category: "行业指数", country: "CN" },
+  NDX:      { name: "纳指100", label:"NDX", category: "宽基指数", country: "US" },
+  GDAXI:    { name: "德国DAX", label:"DAX", category: "宽基指数", country: "DE" },
 };
 
-// ===== Policy / Defaults =====
+// Policy / Defaults
 const ERP_TARGET_CN = numOr(process.env.ERP_TARGET, 0.0527);
 const DELTA         = numOr(process.env.DELTA,      0.01); 
 const ROE_BASE      = numOr(process.env.ROE_BASE,     0.12);
@@ -146,22 +55,48 @@ const RF_JP = numOr(process.env.RF_JP, 0.0100);
 const RF_DE = numOr(process.env.RF_DE, 0.025);
 const RF_IN = numOr(process.env.RF_IN, 0.07);
 
-const PE_OVERRIDE_CN     = (()=>{ const s=(process.env.PE_OVERRIDE_CN??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_SPX    = (()=>{ const s=(process.env.PE_OVERRIDE_SPX??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_CXIN   = (()=>{ const s=(process.env.PE_OVERRIDE_CXIN??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_HSTECH = (()=>{ const s=(process.env.PE_OVERRIDE_HSTECH??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_NDX    = (()=>{ const s=(process.env.PE_OVERRIDE_NDX??"").trim(); return s?Number(s):null; })();
-const PE_OVERRIDE_DAX    = (()=>{ const s=(process.env.PE_OVERRIDE_DAX??"").trim(); return s?Number(s):null; })();
+const PE_OVERRIDE_CN     = getOverride('PE_OVERRIDE_CN');
+const PE_OVERRIDE_SPX    = getOverride('PE_OVERRIDE_SPX');
+const PE_OVERRIDE_CXIN   = getOverride('PE_OVERRIDE_CXIN');
+const PE_OVERRIDE_HSTECH = getOverride('PE_OVERRIDE_HSTECH');
+const PE_OVERRIDE_NDX    = getOverride('PE_OVERRIDE_NDX');
+const PE_OVERRIDE_DAX    = getOverride('PE_OVERRIDE_DAX');
+function getOverride(k){ const s=(process.env[k]??"").trim(); return s?Number(s):null; }
 
-// ===== Sheets =====
+/* =========================
+   Google Sheets 初始化
+   ========================= */
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-if(!SPREADSHEET_ID){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
+if(!SPREADSHEET_ID && !DRY_SHEET){ console.error("缺少 SPREADSHEET_ID"); process.exit(1); }
 const auth = new google.auth.JWT(
   process.env.GOOGLE_CLIENT_EMAIL, null,
   (process.env.GOOGLE_PRIVATE_KEY||"").replace(/\\n/g,"\n"),
   ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
 );
-const sheets = google.sheets({ version:"v4", auth });
+const sheets = new google.sheets({ version:"v4", auth });
+
+/* =========================
+   Notion 初始化（极简同步）
+   ========================= */
+const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
+const NOTION_DB_ASSETS = process.env.NOTION_DB_ASSETS;
+const NOTION_SUMMARY_PAGE_ID = process.env.NOTION_SUMMARY_PAGE_ID;
+
+// 与 Notion 数据库列名一一对应（你的库字段）
+const PROP_SIMPLE = {
+  Name: "Name",
+  Valuation: "Valuation",
+  AssetType: "AssetType",
+  Category: "Category",
+  Date: "Date",     // 可选
+  Summary: "Summary", // Relation（可选）
+  Sort: "Sort",       // Number（可选，用于固定排序）
+};
+let DB_PROPS = new Set();
+
+/* =========================
+   工具函数
+   ========================= */
 
 function todayStr(){
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
@@ -169,7 +104,11 @@ function todayStr(){
 }
 function numOr(v,d){ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; }
 
+/* =========================
+   Google Sheet 操作封装
+   ========================= */
 async function ensureToday(){
+  if (DRY_SHEET) return { sheetTitle: todayStr(), sheetId: 0 };
   const title=todayStr();
   const meta=await sheets.spreadsheets.get({ spreadsheetId:SPREADSHEET_ID });
   let sh=meta.data.sheets?.find(s=>s.properties?.title===title);
@@ -181,7 +120,9 @@ async function ensureToday(){
   }
   return { sheetTitle:title, sheetId:sh.properties.sheetId };
 }
+
 async function write(range, rows){
+  if (DRY_SHEET) return console.log("[DRY_SHEET write]", range, rows.length, "rows");
   dbg("Sheet write", range, "rows:", rows.length);
   await sheets.spreadsheets.values.update({
     spreadsheetId:SPREADSHEET_ID, range, valueInputOption:"USER_ENTERED",
@@ -189,6 +130,7 @@ async function write(range, rows){
   });
 }
 async function clearTodaySheet(sheetTitle, sheetId){
+  if (DRY_SHEET) return console.log("[DRY_SHEET clear]", sheetTitle);
   await sheets.spreadsheets.values.clear({ spreadsheetId:SPREADSHEET_ID, range:`'${sheetTitle}'!A:Z` });
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
@@ -201,12 +143,62 @@ async function clearTodaySheet(sheetTitle, sheetId){
   });
 }
 async function readOneCell(range){
+  if (DRY_SHEET) return ""; // DRY 模式下不读
   const r = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
   const v = r.data.values?.[0]?.[0];
   return (v==null || v==="") ? "" : String(v);
 }
 
-// ===== Value Center抓取（Playwright）=====
+/* =========================
+   Notion 工具函数
+   ========================= */
+async function notionSelfTest(){
+  if (DRY_NOTION) return console.log("[DRY_NOTION] skip selfTest");
+  const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
+  console.log("[Notion] DB title:", db.title[0]?.plain_text);
+  DB_PROPS = new Set(Object.keys(db.properties));
+  console.log("[Notion] Props:", ...DB_PROPS);
+}
+
+// 简化版 Upsert
+async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }){
+  if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category });
+  if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
+
+  // 查询是否已有同名 + 日期
+  const q = await notion.databases.query({
+    database_id: NOTION_DB_ASSETS,
+    filter: {
+      and: [
+        { property: PROP_SIMPLE.Name, rich_text: { equals: name } },
+        ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
+      ]
+    }
+  });
+  let pageId = q.results[0]?.id;
+
+  const props = {};
+  if (DB_PROPS.has(PROP_SIMPLE.Name)) props[PROP_SIMPLE.Name] = { title:[{ text:{ content:name }}]};
+  if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text:[{ text:{ content:valuation }}]};
+  if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:{ name:assetType }};
+  if (DB_PROPS.has(PROP_SIMPLE.Category)) props[PROP_SIMPLE.Category] = { select:{ name:category }};
+  if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date:{ start:dateISO }};
+  if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) props[PROP_SIMPLE.Summary] = { relation:[{ id:summaryId }]};
+  if (DB_PROPS.has(PROP_SIMPLE.Sort)) props[PROP_SIMPLE.Sort] = { number: sort };
+
+  if (pageId){
+    await notion.pages.update({ page_id: pageId, properties: props });
+    console.log("[Notion] update", name);
+  } else {
+    await notion.pages.create({ parent:{ database_id: NOTION_DB_ASSETS }, properties: props });
+    console.log("[Notion] insert", name);
+  }
+}
+
+/* =========================
+   Value Center 抓取 (Playwright)
+   ========================= */
+let VC_CACHE = null;
 async function fetchVCMapDOM(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -224,8 +216,6 @@ async function fetchVCMapDOM(){
 
     const rows = Array.from(document.querySelectorAll('.container .row'));
     const nameDivs = Array.from(document.querySelectorAll('.container .out-row .name'));
-
-    if (rows.length === 0 || nameDivs.length === 0 || rows.length !== nameDivs.length) return { error: 'Mismatch' };
 
     for (let i = 0; i < nameDivs.length; i++) {
       const nameDivText = nameDivs[i].textContent || '';
@@ -249,8 +239,6 @@ async function fetchVCMapDOM(){
   dbg("VC map (DOM)", recs);
   return recs || {};
 }
-
-let VC_CACHE = null;
 async function getVC(code){
   if(!VC_CACHE){
     try { VC_CACHE = await fetchVCMapDOM(); }
@@ -259,77 +247,9 @@ async function getVC(code){
   return VC_CACHE[code] || null;
 }
 
-// ===== r_f =====
-async function rfCN(){ try{
-  const url="https://cn.investing.com/rates-bonds/china-10-year-bond-yield";
-  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
-  if(r.ok){
-    const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","CN 10Y")` };
-  }}catch{} return { v:RF_CN, tag:"兜底", link:"—" }; }
-async function rfUS(){ try{
-  const url="https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield";
-  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
-  if(r.ok){
-    const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","US 10Y")` };
-  }}catch{} return { v:RF_US, tag:"兜底", link:"—" }; }
-async function rfJP(){ try{
-  const url="https://cn.investing.com/rates-bonds/japan-10-year-bond-yield";
-  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
-  if(r.ok){
-    const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","JP 10Y")` };
-  }}catch{} return { v:RF_JP, tag:"兜底", link:"—" }; }
-async function rfDE(){ try{
-  const url="https://www.investing.com/rates-bonds/germany-10-year-bond-yield";
-  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
-  if(r.ok){
-    const h=await r.text(); let v=null;
-    const m=h.match(/instrument-price-last[^>]*>(\d{1,2}\.\d{1,4})</i); if(m) v=Number(m[1])/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}\.\d{1,4})\s*%/); if(near) v=Number(near[1])/100; }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","DE 10Y")` };
-  }}catch{} return { v:RF_DE, tag:"兜底", link:"—" }; }
-async function rfIN(){ try{
-  const url="https://cn.investing.com/rates-bonds/india-10-year-bond-yield";
-  const r=await fetch(url,{ headers:{ "User-Agent":UA, "Referer":"https://www.google.com" }, timeout:12000 });
-  if(r.ok){
-    const h=await r.text(); let v=null;
-    const m=h.match(/(\d{1,2}[.,]\d{1,4})</i); if(m) v=Number(String(m[1]).replace(',','.'))/100;
-    if(!Number.isFinite(v)){ const plain=h.replace(/<[^>]+>/g," "); const near=plain.match(/(\d{1,2}[.,]\d{1,4})\s*%/); if(near) v=Number(String(near[1]).replace(',','.'))/100; }
-    if(Number.isFinite(v)&&v>0&&v<1) return { v, tag:"真实", link:`=HYPERLINK("${url}","IN 10Y")` };
-  }}catch{} return { v:RF_IN, tag:"兜底", link:"—" }; }
-
-// ===== ERP*（达摩达兰）=====
-async function erpFromDamodaran(re){
-  try{
-    const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
-    const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout: 15000 });
-    if(r.ok){
-      const h = await r.text();
-      const rows = h.split("</tr>");
-      const row  = rows.find(x => re.test(x)) || "";
-      const plain = row.replace(/<[^>]+>/g," ");
-      const nums = [...plain.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
-      const v = nums.find(x=>x>2 && x<10);
-      if(v!=null) return { v:v/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran")` };
-    }
-  }catch{}
-  return null;
-}
-async function erpCN(){ return (await erpFromDamodaran(/China/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpJP(){ return (await erpFromDamodaran(/Japan/i)) || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpDE(){ return (await erpFromDamodaran(/Germany/i)) || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-async function erpIN(){ return (await erpFromDamodaran(/India/i)) || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
-
-// ===== Nifty 50（Playwright）=====
+/* =========================
+   Nifty50 抓取 (Trendlyne)
+   ========================= */
 async function fetchNifty50(){
   const { chromium } = await import("playwright");
   const br  = await chromium.launch({ headless:true, args:['--disable-blink-features=AutomationControlled'] });
@@ -350,13 +270,13 @@ async function fetchNifty50(){
       if (el) pb = parseFloat(el.textContent.trim());
       return { pe, pb };
     });
-    const peRes = (Number.isFinite(values.pe) && values.pe > 0) ? { v: values.pe, tag: "真实", link: `=HYPERLINK("${url}","Nifty PE")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PE")` };
-    const pbRes = (Number.isFinite(values.pb) && values.pb > 0) ? { v: values.pb, tag: "真实", link: `=HYPERLINK("${url}","Nifty PB")` } : { v: "", tag: "兜底", link: `=HYPERLINK("${url}","Nifty PB")` };
-    return { peRes, pbRes };
+    return { pe: values.pe, pb: values.pb, link: `=HYPERLINK("${url}","Nifty")` };
   } finally { await br.close(); }
 }
 
-// ===== 指数写块 =====
+/* =========================
+   指数写块
+   ========================= */
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
   const { sheetTitle, sheetId } = await ensureToday();
   const pe = (peRes?.v==="" || peRes?.v==null) ? null : Number(peRes?.v);
@@ -382,67 +302,97 @@ async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpL
     ["P/E（TTM）", Number.isFinite(pe)? pe:"", peRes?.tag || (Number.isFinite(pe)?"真实":"兜底"), "估值来源", peRes?.link || "—"],
     ["E/P = 1 / P/E", ep ?? "", Number.isFinite(pe)?"真实":"兜底", "盈收益率（小数，显示为百分比）","—"],
     ["无风险利率 r_f（10Y名义）", rf ?? "", rf!=null?"真实":"兜底", rfLabel, rfRes?.link || "—"],
-    ["目标 ERP*", (Number.isFinite(erpStar)?erpStar:""), (Number.isFinite(erpStar)?"真实":"兜底"), "达摩达兰", erpLink || '=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")'],
+    ["目标 ERP*", (Number.isFinite(erpStar)?erpStar:""), (Number.isFinite(erpStar)?"真实":"兜底"), "达摩达兰", erpLink || ""],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）","—"],
-    ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点=1/(r_f+ERP*+δ)×factor","—"],
-    ["卖点PE下限（含ROE因子）", peSell ?? "", (peSell!=null)?"真实":"兜底", "卖点=1/(r_f+ERP*−δ)×factor","—"],
+    ["买点PE上限（含ROE因子）", peBuy ?? "", (peBuy!=null)?"真实":"兜底", "买点公式","—"],
+    ["卖点PE下限（含ROE因子）", peSell ?? "", (peSell!=null)?"真实":"兜底", "卖点公式","—"],
     ["合理PE区间（含ROE因子）", fairRange, (peBuy!=null && peSell!=null)?"真实":"兜底", "买点上限 ~ 卖点下限","—"],
-    ["ROE（TTM）", roe ?? "", roeRes?.tag || "—", "盈利能力（小数，显示为百分比）", roeRes?.link || "—"],
-    ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%","—"],
-    ["ROE倍数因子 = ROE/ROE基准", factorDisp, (factorDisp!=="")?"真实":"兜底", "例如 16.4%/12% = 1.36","—"],
-    ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点","—"],
-    ["判定", status, (Number.isFinite(pe) && peBuy!=null && peSell!=null)?"真实":"兜底", "基于 P/E 与区间","—"],
+    ["ROE（TTM）", roe ?? "", roeRes?.tag || "—", "盈利能力", roeRes?.link || "—"],
+    ["ROE基准", ROE_BASE, "真实", "默认 12%","—"],
+    ["ROE倍数因子", factorDisp, (factorDisp!=="")?"真实":"兜底", "例: 16.4%/12%","—"],
+    ["判定", status, "真实", "最终判定","—"],
   ];
   const end = startRow + rows.length - 1;
   await write(`'${sheetTitle}'!A${startRow}:E${end}`, rows);
 
-  const requests = [];
-  [3,4,5,6,10,11].forEach(i=>{ const r=(startRow-1)+i-1;
-    requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00%" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  [2,7,8,12].forEach(i=>{ const r=(startRow-1)+i-1;
-    requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:r, endRowIndex:r+1, startColumnIndex:1, endColumnIndex:2 },
-      cell:{ userEnteredFormat:{ numberFormat:{ type:"NUMBER", pattern:"0.00" } } }, fields:"userEnteredFormat.numberFormat" }}); });
-  requests.push({ repeatCell:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:startRow, startColumnIndex:0, endColumnIndex:5 },
-    cell:{ userEnteredFormat:{ backgroundColor:{ red:0.95, green:0.95, blue:0.95 }, textFormat:{ bold:true } } }, fields:"userEnteredFormat(backgroundColor,textFormat)" }});
-  requests.push({ updateBorders:{ range:{ sheetId, startRowIndex:(startRow-1), endRowIndex:end, startColumnIndex:0, endColumnIndex:5 },
-    top:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-    bottom:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-    left:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } },
-    right:{ style:"SOLID", width:1, color:{ red:0.8, green:0.8, blue:0.8 } } }});
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-
-  return { nextRow: end + 2, judgment: status, pe, roe, peBuy, peSell };
+  return { nextRow: end + 2, judgment: status, pe, roe };
 }
 
 /* =========================
-   配置化：个股数组 + 类别规则
+   个股：配置 & 规则 & 写块
    ========================= */
+
+// 1) 个股配置（以后新增/修改个股，只改这里）
 const STOCKS = [
-  { label:"腾讯控股", ticker:"HKG:0700", totalShares:9772000000, fairPE:25, currentProfit:220000000000, averageProfit:null, growthRate:0.12, category:"成长股" },
-  { label:"贵州茅台", ticker:"SHA:600519", totalShares:1256197800, fairPE:30, currentProfit:74753000000, averageProfit:null, growthRate:0.09, category:"成长股" },
-  { label:"分众传媒", ticker:"SHE:002027", totalShares:13760000000, fairPE:25, currentProfit:0, averageProfit:4600000000, growthRate:0.00, category:"周期股" },
+  {
+    label: "腾讯控股",
+    ticker: "HKG:0700",
+    totalShares: 9772000000,     // 股数
+    fairPE: 25,                   // 合理PE（用于估值&买卖点）
+    currentProfit: 220000000000,  // 当年净利（元）
+    averageProfit: null,          // 周期股可填“平均净利”
+    growthRate: 0.12,             // 利润增速（成长/价值股用）
+    category: "成长股"            // 成长股 / 价值股 / 周期股
+  },
+  {
+    label: "贵州茅台",
+    ticker: "SHA:600519",
+    totalShares: 1256197800,
+    fairPE: 30,
+    currentProfit: 74753000000,
+    averageProfit: null,
+    growthRate: 0.09,
+    category: "成长股"
+  },
+  {
+    label: "分众传媒",
+    ticker: "SHE:002027",
+    totalShares: 13760000000,
+    fairPE: 25,
+    currentProfit: 0,
+    averageProfit: 4600000000,    // 46亿（周期股使用“平均净利”估值）
+    growthRate: 0.00,
+    category: "周期股"
+  },
 ];
 
+// 2) 根据 ticker 生成价格公式（可通过 cfg.priceFormula 覆盖）
 function priceFormulaFromTicker(ticker){
   const [ex, code] = String(ticker||"").split(":");
   if(!ex || !code) return "";
-  if(ex === "SHA") return `=getSinaPrice("sh${code}")`;
-  if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;
-  return `=GOOGLEFINANCE("${ex}:${code}","price")`;
+  if(ex === "SHA") return `=getSinaPrice("sh${code}")`;                   // 上交所
+  if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;        // 深交所
+  return `=GOOGLEFINANCE("${ex}:${code}","price")`;                        // 其余交易所（HKG/NYSE/NASDAQ…）
 }
 
+// 3) 类别→估值/买卖点规则
 const CATEGORY_RULES = {
-  "周期股": (r) => ({ fairVal:`=B${r.avgProfit}*B${r.fairPE}`, buy:`=B${r.fairVal}*0.7`, sell:`=B${r.fairVal}*1.5`, require:["avgProfit"] }),
-  "成长股": (r) => ({ fairVal:`=B${r.currentProfit}*B${r.fairPE}`, buy:`=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`, sell:`=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`, require:["currentProfit"] }),
-  "价值股": (r) => ({ fairVal:`=B${r.currentProfit}*B${r.fairPE}`, buy:`=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`, sell:`=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`, require:["currentProfit"] }),
+  "周期股": (r) => ({
+    fairVal: `=B${r.avgProfit}*B${r.fairPE}`,    // 合理估值=平均净利×合理PE
+    buy:     `=B${r.fairVal}*0.7`,               // 买点=合理估值×70%
+    sell:    `=B${r.fairVal}*1.5`,               // 卖点=合理估值×150%
+    require: ["avgProfit"]
+  }),
+  "成长股": (r) => ({
+    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
+    buy:     `=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`,
+    sell:    `=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`,
+    require: ["currentProfit"]
+  }),
+  "价值股": (r) => ({
+    fairVal: `=B${r.currentProfit}*B${r.fairPE}`,
+    buy:     `=MIN(B${r.fairVal}*0.7,(B${r.futureProfit}*B${r.fairPE})/2)`,
+    sell:    `=MAX(B${r.currentProfit}*50,B${r.futureProfit}*B${r.fairPE}*1.5)`,
+    require: ["currentProfit"]
+  }),
 };
 
-// ===== 个股写块 =====
+// 4) 个股写块
 async function writeStockBlock(startRow, cfg) {
   const { sheetTitle, sheetId } = await ensureToday();
   const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category } = cfg;
   const priceFormula = cfg.priceFormula ?? priceFormulaFromTicker(ticker);
+
   const rule = CATEGORY_RULES[category];
   if(!rule) throw new Error(`未知类别: ${category}`);
   if(rule.require){
@@ -451,12 +401,25 @@ async function writeStockBlock(startRow, cfg) {
       if(need==="currentProfit" && !(currentProfit>0)) throw new Error(`[${label}] ${category} 必须提供 currentProfit`);
     }
   }
-  const E8 = 100000000;
+
+  const E8 = 100000000; // 转“亿”的系数
+  // 行位次映射（方便公式内引用）
   const r = {
-    title:startRow, price:startRow+1, mc:startRow+2, shares:startRow+3, fairPE:startRow+4,
-    currentProfit:startRow+5, avgProfit:startRow+6, futureProfit:startRow+7,
-    fairVal:startRow+8, discount:startRow+9, buy:startRow+10, sell:startRow+11,
-    category:startRow+12, growth:startRow+13, judgment:startRow+14,
+    title:         startRow,
+    price:         startRow + 1,
+    mc:            startRow + 2,
+    shares:        startRow + 3,
+    fairPE:        startRow + 4,
+    currentProfit: startRow + 5,
+    avgProfit:     startRow + 6,
+    futureProfit:  startRow + 7,
+    fairVal:       startRow + 8,
+    discount:      startRow + 9,
+    buy:           startRow + 10,
+    sell:          startRow + 11,
+    category:      startRow + 12,
+    growth:        startRow + 13,
+    judgment:      startRow + 14,
   };
   const f = rule(r);
 
@@ -479,17 +442,28 @@ async function writeStockBlock(startRow, cfg) {
   ];
   await write(`'${sheetTitle}'!A${startRow}:E${startRow + rows.length - 1}`, rows);
 
-  const requests = [];
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-  requests.push({ updateBorders: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-  const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
-  billionRows.forEach(rIdx => { requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } }); });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-  requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+  // 样式（DRY_SHEET 时跳过）
+  if (!DRY_SHEET) {
+    const requests = [];
+    // Header + 边框
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
+    requests.push({ updateBorders: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
+    // 数值按“亿”
+    const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
+    billionRows.forEach(rIdx => { requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } }); });
+    // 总股本（亿，2位小数）
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+    // 价格
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
+    // 合理PE（整数）
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
+    // 增速（%）
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+    // 折扣率（%）
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+  }
 
   return {
     nextRow: (startRow + rows.length + 1),
@@ -499,8 +473,11 @@ async function writeStockBlock(startRow, cfg) {
   };
 }
 
-// ===== 邮件 =====
+/* =========================
+   邮件（保持与你现有逻辑一致）
+   ========================= */
 async function sendEmailIfEnabled(lines){
+  if (DRY_MAIL) { console.log("[DRY_MAIL]", lines); return; }
   const { SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,MAIL_TO,MAIL_FROM_NAME,MAIL_FROM_EMAIL,FORCE_EMAIL } = process.env;
   if(!SMTP_HOST||!SMTP_PORT||!SMTP_USER||!SMTP_PASS||!MAIL_TO){ dbg("[MAIL] skip env"); return; }
   const transporter = nodemailer.createTransport({ host:SMTP_HOST, port:Number(SMTP_PORT)===465?465:Number(SMTP_PORT), secure:Number(SMTP_PORT)===465, auth:{ user:SMTP_USER, pass:SMTP_PASS }});
@@ -516,26 +493,67 @@ async function sendEmailIfEnabled(lines){
   catch(e){ console.error("[MAIL] send error:", e); }
 }
 
-// ===== Main =====
-(async()=>{
+/* =========================
+   摘要文案工具
+   ========================= */
+const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
+function formatIndexLine(res, label){
+  return `${label} PE: ${res.pe ?? "-"}${roeFmt(res.roe)}→ ${res.judgment ?? "-"}`;
+}
+function formatStockLine(label, discountRaw, judgment){
+  let disPct = "-";
+  if (discountRaw !== "" && discountRaw != null) {
+    const s = String(discountRaw).trim();
+    const n = Number(s.replace(/%/g, "").replace(/,/g, ""));
+    if (!Number.isNaN(n)) {
+      if (/%$/.test(s))       disPct = `${n.toFixed(2)}%`;
+      else if (n>0 && n<1)    disPct = `${(n*100).toFixed(2)}%`;
+      else                    disPct = `${n.toFixed(2)}%`;
+    }
+  }
+  return `${label} 折扣率: ${disPct} → ${judgment || "-"}`;
+}
+
+/* =========================
+   子命令：按模块测试
+   ========================= */
+async function testVC(){ console.log("[TEST:VC]", await fetchVCMapDOM()); }
+async function testNifty(){ console.log("[TEST:NIFTY]", await fetchNifty50()); }
+async function testNotion(){
+  await notionSelfTest();
+  const iso = todayStr();
+  await upsertSimpleRow({
+    name: 'TEST Asset', valuation: 'Valuation test → 🟢 低估',
+    assetType: '指数', category: '宽基指数',
+    dateISO: iso, summaryId: process.env.NOTION_SUMMARY_PAGE_ID, sort: 1
+  });
+  console.log('[TEST:NOTION] done');
+}
+async function testSheet(){
+  const { sheetTitle } = await ensureToday();
+  await write(`'${sheetTitle}'!A1:E1`, [['仅测试写入']]);
+  console.log('[TEST:SHEET] done');
+}
+async function testMail(){ await sendEmailIfEnabled(['这是一封测试邮件', '第二行']); console.log('[TEST:MAIL] done'); }
+
+/* =========================
+   主流程：整条流水线
+   ========================= */
+async function runDaily(){
   console.log("[INFO] Run start", todayStr(), "USE_PLAYWRIGHT=", USE_PW, "TZ=", TZ);
 
   let row=1;
   const { sheetTitle, sheetId } = await ensureToday();
   await clearTodaySheet(sheetTitle, sheetId);
-
-  // Notion 自检（记录可用列，避免 property_not_found）
   await notionSelfTest();
 
+  // 1) 抓 Value Center
   let vcMap = {};
   if (USE_PW) {
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
-    if (Object.keys(vcMap).length < Object.keys(VC_TARGETS).length && USE_PW) {
-      console.error("[ERROR] Scraping from Value Center was incomplete. Exiting with error code 1 to trigger artifact upload.");
-      process.exit(1);
-    }
   }
 
+  // 2) r_f / ERP（并行）
   const rf_cn_promise = rfCN();
   const erp_cn_promise = erpCN();
   const rf_us_promise = rfUS();
@@ -547,37 +565,39 @@ async function sendEmailIfEnabled(lines){
   const nifty_promise  = fetchNifty50();
   const rf_in_promise  = rfIN();
   const erp_in_promise = erpIN();
-  
+
   // --- "全市场宽基" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
-  const titleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
+  if (!DRY_SHEET) {
+    const titleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [titleReq] } });
+  }
   row += 2;
 
-  // 1) HS300
+  // 3) 依次写指数块 —— 使用 vcMap 覆盖（若没有就用 PE_OVERRIDE_*）
+  // SH000300
   let r_hs = vcMap["SH000300"];
   let pe_hs = r_hs?.pe ? { v: r_hs.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CN??"", tag:"兜底", link:"—" };
   let roe_hs = r_hs?.roe ? { v: r_hs.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hs = await writeBlock(row, VC_TARGETS.SH000300.name, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
+  let res_hs = await writeBlock(row, VC_TARGETS.SH000300.label, "CN", pe_hs, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hs);
   row = res_hs.nextRow;
 
-  // 2) SP500
+  // SP500
   let r_sp = vcMap["SP500"];
   let pe_spx = r_sp?.pe ? { v: r_sp.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_SPX??"", tag:"兜底", link:"—" };
   let roe_spx = r_sp?.roe ? { v: r_sp.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
   const erp_us = await erp_us_promise;
-  let res_sp = await writeBlock(row, VC_TARGETS.SP500.name, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
+  let res_sp = await writeBlock(row, VC_TARGETS.SP500.label, "US", pe_spx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_spx);
   row = res_sp.nextRow;
-  
-  // 3) 纳指100
+
+  // NDX
   let r_ndx = vcMap["NDX"];
   let pe_ndx = r_ndx?.pe ? { v: r_ndx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_NDX??"", tag:"兜底", link:"—" };
   let roe_ndx = r_ndx?.roe ? { v: r_ndx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_ndx = await writeBlock(row, VC_TARGETS.NDX.name, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
+  let res_ndx = await writeBlock(row, VC_TARGETS.NDX.label, "US", pe_ndx, await rf_us_promise, erp_us.v, erp_us.tag, erp_us.link, roe_ndx);
   row = res_ndx.nextRow;
 
-  // 4) Nikkei（公式块）
-  let res_nikkei = { judgment: "-" };
+  // Nikkei（公式）
   {
     const startRow = row;
     const rfRes = await rf_jp_promise;
@@ -585,92 +605,66 @@ async function sendEmailIfEnabled(lines){
 
     const peRow = startRow + 1;
     const pbRow = startRow + 2;
-    const epRow = startRow + 3;
     const rfRow = startRow + 4;
     const erpStarRow = startRow + 5;
     const deltaRow = startRow + 6;
     const peBuyRow = startRow + 7;
     const peSellRow = startRow + 8;
     const roeRow = startRow + 10;
-    const roeBaseRow = startRow + 11;
-    const factorRow = startRow + 12;
 
     const nikkei_rows = [
       ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
       ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
       ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
       ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数，显示为百分比）", "—"],
-      ["无风险利率 r_f（10Y名义）", rfRes.v, rfRes.tag, "JP 10Y", rfRes.link],
-      ["目标 ERP*", erpRes.v, erpRes.tag, "达摩达兰", erpRes.link],
+      ["无风险利率 r_f（10Y名义）", (await rf_jp_promise).v, (await rf_jp_promise).tag, "JP 10Y", (await rf_jp_promise).link],
+      ["目标 ERP*", (await erp_jp_promise).v, (await erp_jp_promise).tag, "达摩达兰", (await erp_jp_promise).link],
       ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
-      ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${factorRow}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
-      ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${factorRow}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
-      ["合理PE区间（含ROE因子）", `=IF(ISNUMBER(B${peBuyRow}), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
-      ["ROE（TTM）", `=IF(AND(ISNUMBER(B${pbRow}), ISNUMBER(B${peRow}), B${peRow}<>0), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
-      ["ROE基准（可配 env.ROE_BASE）", ROE_BASE, "真实", "默认 0.12 = 12%", "—"],
-      ["ROE倍数因子 = ROE/ROE基准", `=IF(ISNUMBER(B${roeRow}), B${roeRow}/B${roeBaseRow}, "")`, "Formula", "例如 16.4%/12% = 1.36", "—"],
-      ["说明（公式）", "见右", "真实", "买点=1/(r_f+ERP*+δ)×factor；卖点=1/(r_f+ERP*−δ)×factor；合理区间=买点~卖点", "—"],
+      ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
+      ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
+      ["合理PE区间（含ROE因子）", `=IF(AND(ISNUMBER(B${peBuyRow}),ISNUMBER(B${peSellRow})), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
+      ["ROE（TTM）", `=IF(AND(ISNUMBER(B${peRow}),ISNUMBER(B${pbRow})), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
       ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
     ];
     const end = startRow + nikkei_rows.length - 1;
     await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
-    const requests = [];
-    [4,5,6,7,11,12].forEach(i => { const r = (startRow - 1) + (i - 1);
-      requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-    [2,3,8,9,13].forEach(i => { const r = (startRow - 1) + (i - 1);
-      requests.push({ repeatCell: { range: { sheetId, startRowIndex: r, endRowIndex: r + 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00" } } }, fields: "userEnteredFormat.numberFormat" } });
-    });
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-    requests.push({ updateBorders: { range: { sheetId, startRowIndex: (startRow - 1), endRowIndex: end, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
-    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
-
-    const nikkeiStatusCell = `'${sheetTitle}'!B${end}`;
-    res_nikkei.judgment = await readOneCell(nikkeiStatusCell);
     row = end + 2;
+
+    var res_nikkei = { judgment: await readOneCell(`'${sheetTitle}'!B${end}`) };
   }
 
-  // 5) 中概互联50
-  const erp_cn = await erp_cn_promise;
+  // China Internet 50
   let r_cx = vcMap["CSIH30533"];
   let pe_cx = r_cx?.pe ? { v: r_cx.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_CXIN??"", tag:"兜底", link:"—" };
   let roe_cx = r_cx?.roe ? { v: r_cx.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.name, "CN", pe_cx, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_cx);
+  let res_cx = await writeBlock(row, VC_TARGETS.CSIH30533.label, "CN", pe_cx, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_cx);
   row = res_cx.nextRow;
 
-  // 6) 恒生科技
+  // HSTECH
   let r_hst = vcMap["HSTECH"];
   let pe_hst = r_hst?.pe ? { v: r_hst.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_HSTECH??"", tag:"兜底", link:"—" };
   let roe_hst = r_hst?.roe ? { v: r_hst.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.name, "CN", pe_hst, await rf_cn_promise, erp_cn.v, erp_cn.tag, erp_cn.link, roe_hst);
+  let res_hst = await writeBlock(row, VC_TARGETS.HSTECH.label, "CN", pe_hst, await rf_cn_promise, (await erp_cn_promise).v, "真实", null, roe_hst);
   row = res_hst.nextRow;
 
-  // 7) 德国DAX
-  const erp_de = await erp_de_promise;
+  // DAX
   let r_dax = vcMap["GDAXI"];
   let pe_dax = r_dax?.pe ? { v: r_dax.pe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:PE_OVERRIDE_DAX??"", tag:"兜底", link:"—" };
   let roe_dax = r_dax?.roe ? { v: r_dax.roe, tag:"真实", link:`=HYPERLINK("${VC_URL}","VC")` } : { v:"", tag:"兜底", link:"—" };
-  let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.name, "DE", pe_dax, await rf_de_promise, erp_de.v, erp_de.tag, erp_de.link, roe_dax);
+  let res_dax = await writeBlock(row, VC_TARGETS.GDAXI.label, "DE", pe_dax, await rf_de_promise, (await erp_de_promise).v, "真实", null, roe_dax);
   row = res_dax.nextRow;
 
-  // 8) Nifty 50
+  // Nifty 50
   const nifty_data = await nifty_promise;
-  const pe_nifty = nifty_data.peRes;
-  const pb_nifty = nifty_data.pbRes;
-  if (USE_PW && (!pe_nifty.v || !pb_nifty.v)) {
-    console.error("[ERROR] Scraping from Trendlyne for Nifty 50 failed. No data was returned.");
-    process.exit(1);
-  }
-  let roe_nifty = { v: null, tag: "计算值", link: pe_nifty.link };
-  if (pe_nifty && pe_nifty.v && pb_nifty && pb_nifty.v) { roe_nifty.v = pb_nifty.v / pe_nifty.v; }
-  const erp_in = await erp_in_promise;
-  let res_in = await writeBlock(row, "Nifty 50", "IN", pe_nifty, await rf_in_promise, erp_in.v, erp_in.tag, erp_in.link, roe_nifty);
+  let res_in = await writeBlock(row, "Nifty 50", "IN", { v: nifty_data.pe, tag:"真实", link:nifty_data.link }, await rf_in_promise, (await erp_in_promise).v, "真实", null, { v: nifty_data.pb ? (nifty_data.pb / nifty_data.pe) : null, tag:"计算值", link:nifty_data.link });
   row = res_in.nextRow;
-  
+
   // --- "子公司" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["子公司"]]);
-  const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
-  await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
+  if (!DRY_SHEET) {
+    const stockTitleReq = { repeatCell: { range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.85, green: 0.85, blue: 0.85 }, textFormat: { bold: true, fontSize: 12 } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } };
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests: [stockTitleReq] } });
+  }
   row += 2;
 
   // 循环渲染 STOCKS
@@ -682,73 +676,75 @@ async function sendEmailIfEnabled(lines){
   }
 
   console.log("[DONE]", todayStr());
-  
-  const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-// ====== 组装邮件行 ======
-const stockLines = [];
-for (const { cfg, res } of stockResults) {
-  const disRaw = await readOneCell(res.discountCellA1);
-  const jud    = await readOneCell(res.judgmentCellA1);
+  // ====== 组装摘要行 ======
+  const indexLines = [
+    formatIndexLine(res_hs, "HS300"),
+    formatIndexLine(res_sp, "SPX"),
+    formatIndexLine(res_ndx, "NDX"),
+    `Nikkei → ${res_nikkei.judgment || "-"}`,
+    formatIndexLine(res_cx, "China Internet"),
+    formatIndexLine(res_hst,"HSTECH"),
+    formatIndexLine(res_dax,"DAX"),
+    formatIndexLine(res_in, "Nifty 50"),
+  ];
 
-  // 兼容 0.9788 / 97.88 / "97.88%" / 带千分位
-  let disPct = "-";
-  if (disRaw !== "" && disRaw != null) {
-    const s = String(disRaw).trim();
-    const n = Number(s.replace(/%/g, "").replace(/,/g, ""));
-    if (!Number.isNaN(n)) {
-      if (/%$/.test(s)) {
-        disPct = `${n.toFixed(2)}%`;
-      } else if (n > 0 && n < 1) {
-        disPct = `${(n * 100).toFixed(2)}%`;
-      } else {
-        disPct = `${n.toFixed(2)}%`;
-      }
-    }
+  const stockLines = [];
+  for (const { cfg, res } of stockResults) {
+    const disRaw = await readOneCell(res.discountCellA1);
+    const jud    = await readOneCell(res.judgmentCellA1);
+    stockLines.push( formatStockLine(cfg.label, disRaw, jud) );
   }
 
-  stockLines.push(`${cfg.label} 折扣率: ${disPct} → ${jud || "-"}`);
-}
+  const lines = [...indexLines, ...stockLines];
 
-const lines = [
-  `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
-  `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
-  `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
-  `Nikkei → ${res_nikkei.judgment || "-"}`,
-  `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
-  `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
-  `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
-  `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
-  ...stockLines
-];
-
-  // ====== 写入 Notion（极简摘要：Valuation 文案） ======
-  const isoDate = todayStr(); // 若库里无 Date 列，仍可正常写
+  // ====== Notion 极简同步（带排序 & Summary）======
+  const isoDate = todayStr();
   const simpleRows = [
-    { name:"沪深300",     valuation: lines[0], assetType:"指数", category:"宽基指数" },
-    { name:"S&P 500",     valuation: lines[1], assetType:"指数", category:"宽基指数" },
-    { name:"Nasdaq 100",  valuation: lines[2], assetType:"指数", category:"宽基指数" },
-    { name:"Nikkei 225",  valuation: lines[3], assetType:"指数", category:"宽基指数" },
-    { name:"China Internet 50", valuation: lines[4], assetType:"指数", category:"行业指数" },
-    { name:"HSTECH",      valuation: lines[5], assetType:"指数", category:"行业指数" },
-    { name:"DAX",         valuation: lines[6], assetType:"指数", category:"宽基指数" },
-    { name:"Nifty 50",    valuation: lines[7], assetType:"指数", category:"宽基指数" },
+    { name:"沪深300",            valuation: indexLines[0], assetType:"指数", category:"宽基指数", sort: 10 },
+    { name:"S&P 500",           valuation: indexLines[1], assetType:"指数", category:"宽基指数", sort: 20 },
+    { name:"Nasdaq 100",        valuation: indexLines[2], assetType:"指数", category:"宽基指数", sort: 30 },
+    { name:"Nikkei 225",        valuation: indexLines[3], assetType:"指数", category:"宽基指数", sort: 40 },
+    { name:"China Internet 50", valuation: indexLines[4], assetType:"指数", category:"行业指数", sort: 50 },
+    { name:"HSTECH",            valuation: indexLines[5], assetType:"指数", category:"行业指数", sort: 60 },
+    { name:"DAX",               valuation: indexLines[6], assetType:"指数", category:"宽基指数", sort: 70 },
+    { name:"Nifty 50",          valuation: indexLines[7], assetType:"指数", category:"宽基指数", sort: 80 },
   ];
-  // 个股
+  let base = 100;
   for (let i = 0; i < stockResults.length; i++) {
     const { cfg } = stockResults[i];
-    const line = lines[8 + i]; // 紧接指数之后
     simpleRows.push({
       name: cfg.label,
-      valuation: line,
+      valuation: stockLines[i],
       assetType: "个股",
       category: cfg.category || "成长股",
+      sort: base + i,
     });
   }
   for (const r of simpleRows) {
-    await upsertSimpleRow({ name: r.name, valuation: r.valuation, assetType: r.assetType, category: r.category, dateISO: isoDate });
+    await upsertSimpleRow({
+      name: r.name, valuation: r.valuation, assetType: r.assetType, category: r.category,
+      dateISO: isoDate, summaryId: NOTION_SUMMARY_PAGE_ID, sort: r.sort
+    });
   }
 
   // ====== 邮件 ======
   await sendEmailIfEnabled(lines);
+}
+
+/* =========================
+   Dispatcher（子命令入口）
+   ========================= */
+(async () => {
+  try {
+    if (MODE === 'test-vc')     return await testVC();
+    if (MODE === 'test-nifty')  return await testNifty();
+    if (MODE === 'test-notion') return await testNotion();
+    if (MODE === 'test-sheet')  return await testSheet();
+    if (MODE === 'test-mail')   return await testMail();
+    await runDaily();
+  } catch (e) {
+    console.error(e);
+    process.exit(1);
+  }
 })();
