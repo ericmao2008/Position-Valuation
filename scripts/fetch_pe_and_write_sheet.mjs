@@ -650,25 +650,27 @@ async function sendEmailIfEnabled(lines){
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
   // ====== 组装邮件行 ======
-  const stockLines = [];
-  for (const { cfg, res } of stockResults) {
-    const dis = await readOneCell(res.discountCellA1);
-    const jud = await readOneCell(res.judgmentCellA1);
-    const disPct = dis ? `${(Number(dis)*100).toFixed(2)}%` : "-";
-    stockLines.push(`${cfg.label} 折扣率: ${disPct} → ${jud || "-"}`);
-  }
+const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
-  const lines = [
-    `HS300 PE: ${r_hs ? (r_hs.pe ?? "-") : "-"} ${roeFmt(r_hs ? r_hs.roe : null)}→ ${r_hs ? r_hs.judgment : "-"}`,
-    `SPX PE: ${r_sp ? (r_sp.pe ?? "-") : "-"} ${roeFmt(r_sp ? r_sp.roe : null)}→ ${r_sp ? r_sp.judgment : "-"}`,
-    `NDX PE: ${r_ndx ? (r_ndx.pe ?? "-") : "-"} ${roeFmt(r_ndx ? r_ndx.roe : null)}→ ${r_ndx ? r_ndx.judgment : "-"}`,
-    `Nikkei → ${res_nikkei.judgment || "-"}`,
-    `China Internet PE: ${r_cx ? (r_cx.pe ?? "-") : "-"} ${roeFmt(r_cx ? r_cx.roe : null)}→ ${r_cx ? r_cx.judgment : "-"}`,
-    `HSTECH PE: ${r_hst ? (r_hst.pe ?? "-") : "-"} ${roeFmt(r_hst ? r_hst.roe : null)}→ ${r_hst ? r_hst.judgment : "-"}`,
-    `DAX PE: ${r_dax ? (r_dax.pe ?? "-") : "-"} ${roeFmt(r_dax ? r_dax.roe : null)}→ ${r_dax ? r_dax.judgment : "-"}`,
-    `Nifty 50 PE: ${r_in ? (r_in.pe ?? "-") : (res_in.pe ?? "-")} ${roeFmt(r_in ? r_in.roe : res_in.roe)}→ ${r_in ? r_in.judgment : res_in.judgment}`,
-    ...stockLines
-  ];
+const stockLines = [];
+for (const { cfg, res } of stockResults) {
+  const dis = await readOneCell(res.discountCellA1);
+  const jud = await readOneCell(res.judgmentCellA1);
+  const disPct = dis ? `${(Number(dis)*100).toFixed(2)}%` : "-";
+  stockLines.push(`${cfg.label} 折扣率: ${disPct} → ${jud || "-"}`);
+}
+
+const lines = [
+  `HS300 PE: ${res_hs.pe ?? "-"} ${roeFmt(res_hs.roe)}→ ${res_hs.judgment ?? "-"}`,
+  `SPX PE: ${res_sp.pe ?? "-"} ${roeFmt(res_sp.roe)}→ ${res_sp.judgment ?? "-"}`,
+  `NDX PE: ${res_ndx.pe ?? "-"} ${roeFmt(res_ndx.roe)}→ ${res_ndx.judgment ?? "-"}`,
+  `Nikkei → ${res_nikkei.judgment || "-"}`,
+  `China Internet PE: ${res_cx.pe ?? "-"} ${roeFmt(res_cx.roe)}→ ${res_cx.judgment ?? "-"}`,
+  `HSTECH PE: ${res_hst.pe ?? "-"} ${roeFmt(res_hst.roe)}→ ${res_hst.judgment ?? "-"}`,
+  `DAX PE: ${res_dax.pe ?? "-"} ${roeFmt(res_dax.roe)}→ ${res_dax.judgment ?? "-"}`,
+  `Nifty 50 PE: ${res_in.pe ?? "-"} ${roeFmt(res_in.roe)}→ ${res_in.judgment ?? "-"}`,
+  ...stockLines
+];
 
   // ====== 写入 Notion（极简摘要：Valuation 文案） ======
   const isoDate = todayStr(); // 若库里无 Date 列，仍可正常写
