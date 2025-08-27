@@ -14,5 +14,6 @@
     "nodemailer": "^7.0.5",
     "playwright": "^1.45.0",
     "@notionhq/client": "^2.2.14"
+    "dotenv": "^16.4.5"
   }
 }
