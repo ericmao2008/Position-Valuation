@@ -274,6 +274,61 @@ async function fetchNifty50(){
 }
 
 /* =========================
+   Risk-free yields (Investing.com) & ERP* (Damodaran)
+   ========================= */
+
+// 通用抓取：从 Investing.com 抓 10Y，失败就用 fallback
+async function rfFromInvesting(url, fallback, label, allowComma=false){
+  try{
+    const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:12000 });
+    if(r.ok){
+      const h = await r.text(); let v=null;
+      // 兼容 12.34 或 12,34
+      const m1 = allowComma ? h.match(/(\d{1,2}[.,]\d{1,4})</i) : h.match(/(\d{1,2}\.\d{1,4})</i);
+      if (m1) v = Number(String(m1[1]).replace(',','.'))/100;
+      if(!Number.isFinite(v)){
+        const plain = h.replace(/<[^>]+>/g," ");
+        const m2 = plain.match(/(\d{1,2}[.,]?\d{0,4})\s*%/);
+        if (m2) v = Number(String(m2[1]).replace(',','.'))/100;
+      }
+      if(Number.isFinite(v) && v>0 && v<1){
+        return { v, tag:"真实", link:`=HYPERLINK("${url}","${label}")` };
+      }
+    }
+  }catch(_e){}
+  return { v: fallback, tag:"兜底", link:"—" };
+}
+
+// 五个国家/地区的 r_f（10Y）
+async function rfCN(){ return await rfFromInvesting("https://cn.investing.com/rates-bonds/china-10-year-bond-yield",  RF_CN, "CN 10Y"); }
+async function rfUS(){ return await rfFromInvesting("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield",     RF_US, "US 10Y"); }
+async function rfJP(){ return await rfFromInvesting("https://cn.investing.com/rates-bonds/japan-10-year-bond-yield",      RF_JP, "JP 10Y"); }
+async function rfDE(){ return await rfFromInvesting("https://www.investing.com/rates-bonds/germany-10-year-bond-yield",   RF_DE, "DE 10Y"); }
+async function rfIN(){ return await rfFromInvesting("https://cn.investing.com/rates-bonds/india-10-year-bond-yield",      RF_IN, "IN 10Y", true); }
+
+// ERP*（达摩达兰），失败用兜底
+async function erpFromDamodaran(re){
+  try{
+    const url="https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html";
+    const r = await fetch(url, { headers:{ "User-Agent": UA }, timeout:15000 });
+    if(r.ok){
+      const h = await r.text();
+      const row = h.split("</tr>").find(x => re.test(x)) || "";
+      const plain = row.replace(/<[^>]+>/g," ");
+      const nums = [...plain.matchAll(/(\d{1,2}\.\d{1,2})\s*%/g)].map(m=>Number(m[1]));
+      const v = nums.find(x=>x>2 && x<10);
+      if(v!=null) return { v:v/100, tag:"真实", link:`=HYPERLINK("${url}","Damodaran")` };
+    }
+  }catch(_e){}
+  return null;
+}
+async function erpCN(){ return (await erpFromDamodaran(/China/i))                  || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpUS(){ return (await erpFromDamodaran(/(United\s*States|USA)/i))  || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpJP(){ return (await erpFromDamodaran(/Japan/i))                  || { v:0.0527, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpDE(){ return (await erpFromDamodaran(/Germany/i))                || { v:0.0433, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+async function erpIN(){ return (await erpFromDamodaran(/India/i))                  || { v:0.0726, tag:"兜底", link:'=HYPERLINK("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html","Damodaran")' }; }
+
+/* =========================
    指数写块
    ========================= */
 async function writeBlock(startRow,label,country,peRes,rfRes,erpStar,erpTag,erpLink,roeRes){
