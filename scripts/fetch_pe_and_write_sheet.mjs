@@ -887,39 +887,39 @@ async function getErp(country){ return await erpP[country]; }
 
 // 从 Actions 传入：process.env.MODE（如果没传，默认 full）
 // 也兼容命令行 --mode=xxx 的方式（本地/云端可复用）
-const MODE = process.env.MODE
+const _MODE = process.env.MODE
   || ((process.argv.slice(2).find(a => a.startsWith('--mode=')) || '').split('=')[1])
   || 'full';
 
-console.log('[INFO] MODE =', MODE);
+console.log('[INFO] MODE =', _MODE);
 
 (async () => {
   try {
-    if (MODE === 'test-vc') {
+    if (_MODE === 'test-vc') {
       console.log('[TEST] 只测试 VC 抓取');
       await testVC();
       return;
     }
 
-    if (MODE === 'test-nifty') {
+    if (_MODE === 'test-nifty') {
       console.log('[TEST] 只测试 Nifty 50 抓取');
       await testNifty();
       return;
     }
 
-    if (MODE === 'test-sheet') {
+    if (_MODE === 'test-sheet') {
       console.log('[TEST] 只测试写 Google Sheet（建议在工作流里 DRY_SHEET=0，其它 DRY=1）');
       await runDaily();   // 是否真写由 env: DRY_* 控制
       return;
     }
 
-    if (MODE === 'test-notion') {
+    if (_MODE === 'test-notion') {
       console.log('[TEST] 只测试写 Notion（建议 DRY_SHEET=1, DRY_MAIL=1）');
       await runDaily();
       return;
     }
 
-    if (MODE === 'test-mail') {
+    if (_MODE === 'test-mail') {
       console.log('[TEST] 只测试邮件（建议 DRY_MAIL=0，其它 DRY=1）');
       await sendEmailIfEnabled(['这是一封测试邮件', '第二行']);
       return;
