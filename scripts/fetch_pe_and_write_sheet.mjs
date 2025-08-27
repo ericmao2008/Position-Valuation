@@ -55,18 +55,29 @@ async function findPageByNameDate(dbId, name, dateISO){
   });
   return r.results?.[0] || null;
 }
-async function upsertSimpleRow({ name, valuation, assetType, category, dateISO }){
-  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) { 
+// 增：让 upsertSimpleRow 支持传入 summaryId（dashboard 里那条页面的 page_id）
+async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId }){
+  if (!NOTION_DB_ASSETS || !process.env.NOTION_TOKEN) {
     console.log("[Notion] skip: env not set"); return;
   }
   const props = {};
-  props[PROP_SIMPLE.Name] = { title: [{ text: { content: name } }] };
+  props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
   props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
   setIfExists(props, PROP_SIMPLE.AssetType, Sel(assetType));
-  setIfExists(props, PROP_SIMPLE.Category, Sel(category));
-  setIfExists(props, PROP_SIMPLE.Date, dateISO ? { date: { start: dateISO } } : undefined);
+  setIfExists(props, PROP_SIMPLE.Category,  Sel(category));
+  setIfExists(props, PROP_SIMPLE.Date,      dateISO ? { date: { start: dateISO } } : undefined);
+
+  // ★ 如数据库里存在 Summary 字段，并且传入了 summaryId，则建立关联
+  if (summaryId && DB_PROPS.has("Summary")) {
+    props["Summary"] = { relation: [{ id: summaryId }] };
+  }
 
   try {
+    // ★ 先清理旧记录上的 Summary（确保 dashboard 只指向“当天最新”）
+    if (DB_PROPS.has("Summary")) {
+      await clearOldSummaryLinks(name);
+    }
+
     const exist = await findPageByNameDate(NOTION_DB_ASSETS, name, dateISO);
     if (exist) {
       await notion.pages.update({ page_id: exist.id, properties: props });
@@ -79,7 +90,26 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO }
     console.error("[Notion] upsertSimple error:", e?.message || e);
   }
 }
-
+// 清理旧的 Summary 关系：把同名资产的历史行 Summary 清空
+async function clearOldSummaryLinks(assetName) {
+  try {
+    const r = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: { property: PROP_SIMPLE.Name, title: { equals: assetName } }
+    });
+    for (const page of r.results) {
+      // 只清空 Summary，不动其它字段
+      if (DB_PROPS.has("Summary")) {
+        await notion.pages.update({
+          page_id: page.id,
+          properties: { Summary: { relation: [] } }
+        });
+      }
+    }
+  } catch (e) {
+    console.error("[Notion] clearOldSummaryLinks:", e?.message || e);
+  }
+}
 // ===== Global =====
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 const USE_PW = String(process.env.USE_PLAYWRIGHT ?? "0") === "1";
