@@ -650,8 +650,6 @@ async function sendEmailIfEnabled(lines){
   const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
 
   // ====== 组装邮件行 ======
-const roeFmt = (r) => r != null ? ` (ROE: ${(r * 100).toFixed(2)}%)` : '';
-
 const stockLines = [];
 for (const { cfg, res } of stockResults) {
   const dis = await readOneCell(res.discountCellA1);
