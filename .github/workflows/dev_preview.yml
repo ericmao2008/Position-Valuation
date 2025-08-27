@@ -1,19 +1,57 @@
-env:
-  GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
-  GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
-  SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
-  NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
-  NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
-  NOTION_SUMMARY_PAGE_ID: ${{ vars.NOTION_SUMMARY_PAGE_ID }}
-  SMTP_HOST:           ${{ secrets.SMTP_HOST }}
-  SMTP_PORT:           ${{ secrets.SMTP_PORT }}
-  SMTP_USER:           ${{ secrets.SMTP_USER }}
-  SMTP_PASS:           ${{ secrets.SMTP_PASS }}
-  MAIL_TO:             ${{ vars.MAIL_TO }}
-  MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
-  TZ:                  Asia/Shanghai
-  USE_PLAYWRIGHT:      '1'
-  DEBUG_VERBOSE:       '1'
-  DRY_SHEET:           '1'
-  DRY_NOTION:          '0'
-  DRY_MAIL:            '1'
+name: Dev Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式 (full/test-vc/test-nifty/test-sheet/test-notion/test-mail)"
+        required: true
+        default: "full"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+      GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
+      SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
+      NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
+      NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
+      NOTION_SUMMARY_PAGE_ID: ${{ vars.NOTION_SUMMARY_PAGE_ID }}
+      SMTP_HOST:           ${{ secrets.SMTP_HOST }}
+      SMTP_PORT:           ${{ secrets.SMTP_PORT }}
+      SMTP_USER:           ${{ secrets.SMTP_USER }}
+      SMTP_PASS:           ${{ secrets.SMTP_PASS }}
+      MAIL_TO:             ${{ vars.MAIL_TO }}
+      MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
+      TZ:                  Asia/Shanghai
+      USE_PLAYWRIGHT:      '1'
+      DEBUG_VERBOSE:       '1'
+      DRY_SHEET:           '1'   # 调试时默认不写 Sheet
+      DRY_NOTION:          '0'   # 调试时默认写 Notion
+      DRY_MAIL:            '1'   # 调试时默认不发邮件
+      MODE:                ${{ github.event.inputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm i
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium --with-deps
+
+      - name: Run fetch script (Dev Preview)
+        run: |
+          set -e
+          echo "Running with MODE=${MODE}"
+          node scripts/fetch_pe_and_write_sheet.mjs
