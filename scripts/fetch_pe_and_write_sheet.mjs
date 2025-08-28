@@ -738,41 +738,46 @@ async function runDaily(){
   row = res_ndx.nextRow;
 }
 
-  // Nikkei（公式）
-  {
-    const startRow = row;
-    const rfRes = await rf_jp_promise;
-    const erpRes = await erp_jp_promise;
+ // Nikkei（公式）
+{
+  const startRow = row;
 
-    const peRow = startRow + 1;
-    const pbRow = startRow + 2;
-    const rfRow = startRow + 4;
-    const erpStarRow = startRow + 5;
-    const deltaRow = startRow + 6;
-    const peBuyRow = startRow + 7;
-    const peSellRow = startRow + 8;
-    const roeRow = startRow + 10;
+  // ★ 改用 getRf('JP') / getErp('JP')，不要再用 rf_jp_promise / erp_jp_promise
+  const rfRes  = await getRf('JP');   // { v, tag, link }
+  const erpRes = await getErp('JP');  // { v, tag, link }
 
-    const nikkei_rows = [
-      ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
-      ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
-      ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
-      ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数，显示为百分比）", "—"],
-      ["无风险利率 r_f（10Y名义）", (await rf_jp_promise).v, (await rf_jp_promise).tag, "JP 10Y", (await rf_jp_promise).link],
-      ["目标 ERP*", (await erp_jp_promise).v, (await erp_jp_promise).tag, "达摩达兰", (await erp_jp_promise).link],
-      ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
-      ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
-      ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
-      ["合理PE区间（含ROE因子）", `=IF(AND(ISNUMBER(B${peBuyRow}),ISNUMBER(B${peSellRow})), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
-      ["ROE（TTM）", `=IF(AND(ISNUMBER(B${peRow}),ISNUMBER(B${pbRow})), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
-      ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
-    ];
-    const end = startRow + nikkei_rows.length - 1;
-    await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
-    row = end + 2;
+  const peRow      = startRow + 1;
+  const pbRow      = startRow + 2;
+  const rfRow      = startRow + 4;
+  const erpStarRow = startRow + 5;
+  const deltaRow   = startRow + 6;
+  const peBuyRow   = startRow + 7;
+  const peSellRow  = startRow + 8;
+  const roeRow     = startRow + 10;
 
-    var res_nikkei = { judgment: await readOneCell(`'${sheetTitle}'!B${end}`) };
-  }
+  const nikkei_rows = [
+    ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
+    ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
+    ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
+    ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数，显示为百分比）", "—"],
+    ["无风险利率 r_f（10Y名义）", rfRes.v,  rfRes.tag,  "JP 10Y",     rfRes.link],
+    ["目标 ERP*",              erpRes.v, erpRes.tag, "达摩达兰", erpRes.link],
+    ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
+    // 用 ROE 倍数因子计算买/卖点（与其它指数保持一致）
+    ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
+    ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
+    ["合理PE区间（含ROE因子）", `=IF(AND(ISNUMBER(B${peBuyRow}),ISNUMBER(B${peSellRow})), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
+    ["ROE（TTM）", `=IF(AND(ISNUMBER(B${peRow}),ISNUMBER(B${pbRow})), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
+    ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
+  ];
+
+  const end = startRow + nikkei_rows.length - 1;
+  await write(`'${sheetTitle}'!A${startRow}:E${end}`, nikkei_rows);
+  row = end + 2;
+
+  // 只需要判定用于邮件文案
+  var res_nikkei = { judgment: await readOneCell(`'${sheetTitle}'!B${end}`) };
+}
 
 // China Internet 50
 {
