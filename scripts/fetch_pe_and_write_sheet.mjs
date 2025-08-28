@@ -192,7 +192,7 @@ async function fetchSinaPrice(sinaCode) {
   const url = `http://hq.sinajs.cn/list=${sinaCode}`;
   try {
     const r = await fetch(url, { headers: { "Referer": "https://finance.sina.com.cn" } });
-    const txt = await r.text();         // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,....";
+    const txt = await r.text();         // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,...";
     const m = txt.match(/"([^"]+)"/);
     if (m && m[1]) {
       const parts = m[1].split(",");
@@ -205,13 +205,37 @@ async function fetchSinaPrice(sinaCode) {
   return null;
 }
 
-// 抓取 Google Finance（HKG/US 等；简单解析）
+// === Yahoo Finance 抓价（更稳） ===
+// 映射：HKG:0700 -> 0700.HK；NASDAQ:AAPL -> AAPL；NYSE:TSLA -> TSLA
+function toYahooSymbol(ticker) {
+  const [ex, code] = String(ticker||"").split(":");
+  if (!ex || !code) return null;
+  if (ex === "HKG")    return `${code.padStart(4,'0')}.HK`; // 0700.HK
+  if (ex === "NASDAQ" || ex === "NYSE") return code;
+  return null;
+}
+async function fetchYahooPrice(ticker) {
+  const ysym = toYahooSymbol(ticker);
+  if (!ysym) return null;
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ysym)}`;
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": UA } });
+    const j = await r.json();
+    const p = j?.quoteResponse?.result?.[0]?.regularMarketPrice;
+    if (Number.isFinite(p)) return p;
+  } catch(e) {
+    console.error("[YahooPrice error]", ticker, e?.message || e);
+  }
+  return null;
+}
+
+// 抓取 Google Finance（兜底）
 async function fetchGooglePrice(ticker) {
   const url = `https://www.google.com/finance/quote/${ticker.replace(':',':')}`;
   try {
     const r = await fetch(url, { headers: { "User-Agent": UA } });
     const html = await r.text();
-    // "price":{"raw":122.34  或  "price":{"raw":122}
+    // "price":{"raw":122.34}
     const m = html.match(/"price"\s*:\s*\{\s*"raw"\s*:\s*([\d.]+)/i);
     if (m) {
       const price = parseFloat(m[1]);
@@ -223,23 +247,30 @@ async function fetchGooglePrice(ticker) {
   return null;
 }
 
-// 统一对外：优先 A股（新浪），否则 Google Finance（HKG/US 等）
+// 统一对外：优先 A股（新浪）→ 再试 Yahoo（HKG/US）→ 最后 Google（兜底）
 async function fetchPrice(ticker) {
-  // 允许通过环境变量强制覆盖（开发/兜底时有用）
-  const envKey = `PRICE_OVERRIDE_${ticker.replace(/[:.]/g,'_')}`; // 例如 PRICE_OVERRIDE_SHA_600519
+  // 可选：环境变量兜底（例如 PRICE_OVERRIDE_SHA_600519）
+  const envKey = `PRICE_OVERRIDE_${ticker.replace(/[:.]/g,'_')}`;
   const envVal = process.env[envKey];
   if (envVal && Number.isFinite(Number(envVal))) return Number(envVal);
 
+  // A 股优先新浪
   const sina = toSinaCode(ticker);
   if (sina) {
     const p = await fetchSinaPrice(sina);
     if (p != null) return p;
   }
-  return await fetchGooglePrice(ticker);   // HKG/NYSE/NASDAQ 等
+
+  // 港/美股优先 Yahoo
+  const y = await fetchYahooPrice(ticker);
+  if (y != null) return y;
+
+  // 最后兜底 Google HTML
+  return await fetchGooglePrice(ticker);
 }
 
 /* =========================
-   Notion 工具函数
+   Notion 工具函数（极简同步：当天覆盖 + Summary 只挂今天）
    ========================= */
 async function notionSelfTest(){
   if (DRY_NOTION) return console.log("[DRY_NOTION] skip selfTest");
@@ -257,10 +288,13 @@ async function notionSelfTest(){
   }
 }
 
-// ===== 清理旧 Summary =====
-// 把同名资产（历史所有记录）的 Summary 关系清空；当天再重新挂上
+/**
+ * 清理同名资产的历史 Summary：把所有“同名”的页面 Summary 关系清空
+ * 这样 Dashboard 只会显示当天挂了 Summary 的那一条
+ */
 async function clearOldSummaryLinks(assetName) {
   if (!NOTION_DB_ASSETS) return;
+  if (!DB_PROPS.has(PROP_SIMPLE.Summary)) return;
   try {
     const r = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
@@ -269,7 +303,7 @@ async function clearOldSummaryLinks(assetName) {
     for (const page of r.results || []) {
       await notion.pages.update({
         page_id: page.id,
-        properties: { Summary: { relation: [] } }  // 清空 relation
+        properties: { [PROP_SIMPLE.Summary]: { relation: [] } }  // 清空 relation
       });
     }
   } catch (e) {
@@ -277,13 +311,46 @@ async function clearOldSummaryLinks(assetName) {
   }
 }
 
-// ===== 简化版 Upsert，带 Summary 清理 & 当天覆盖 =====
+/**
+ * 同名 + 同日 去重：保留最近编辑的一条，其余归档
+ * 返回保留的 pageId（如果只有一条或不存在，则返回 undefined）
+ */
+async function dedupeSameDay(name, dateISO) {
+  if (!NOTION_DB_ASSETS || !dateISO) return;
+  try {
+    const res = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: { and: [
+        { property: PROP_SIMPLE.Name, title: { equals: name } },
+        { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
+      ]},
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+    });
+    const pages = res.results || [];
+    if (pages.length <= 1) return pages[0]?.id;
+    const keep = pages[0].id;
+    for (let i = 1; i < pages.length; i++) {
+      await notion.pages.update({ page_id: pages[i].id, archived: true });
+    }
+    return keep;
+  } catch (e) {
+    console.error("[Notion] dedupeSameDay error:", e?.message || e);
+  }
+}
+
+/**
+ * Upsert（Name+Date 唯一）：
+ * - 同日覆盖（update），否则 create
+ * - 在写入前清空同名资产历史 Summary
+ * - 仅给“今天这条”挂 Summary（NOTION_SUMMARY_PAGE_ID）
+ * - 可写排序 Sort 方便 Dashboard 固定顺序
+ */
 async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
   if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
   if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
 
   try {
-    // 1) 查询是否已有“同名 + 当天”记录
+    // 1) 查询是否已有“同名 + 当天”
     const q = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
       filter: {
@@ -291,14 +358,15 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
           { property: PROP_SIMPLE.Name, title: { equals: name } },
           ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
         ]
-      }
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
     });
     let pageId = q.results?.[0]?.id;
 
-    // 2) 清理同名资产的历史 Summary（保证 Dashboard 只显示当天）
+    // 2) 清理同名资产历史 Summary（保证 Dashboard 只显示当天）
     await clearOldSummaryLinks(name);
 
-    // 3) 组装 props（存在才写）
+    // 3) 组装 props（只写存在的字段）
     const props = {};
     if (DB_PROPS.has(PROP_SIMPLE.Name))      props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
     if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
@@ -307,7 +375,7 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
     if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date: { start: dateISO } };
     if (DB_PROPS.has(PROP_SIMPLE.Sort))      props[PROP_SIMPLE.Sort]      = { number: sort };
 
-    // 只给“当天记录”挂 Summary
+    // 只给当天这条挂 Summary（summaryId 建议传 NOTION_SUMMARY_PAGE_ID；必须是某个 DB 行的 page id）
     if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
       props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
     }
@@ -320,6 +388,10 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
       await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
       console.log("[Notion] insert", name);
     }
+
+    // 5) 再做一次“同日去重”兜底（意外生成多条时归并）
+    await dedupeSameDay(name, dateISO);
+
   } catch (e) {
     console.error("[Notion] upsert error:", e?.message || e);
   }
