@@ -299,6 +299,41 @@ async function rfFromInvesting(url, fallback, label, allowComma=false){
   return { v: fallback, tag:"兜底", link:"—" };
 }
 
+/* ========= R_f / ERP 全局映射（懒初始化） ========= */
+let rfP = null;
+let erpP = null;
+
+function initRfErpMaps(){
+  if (!rfP) {
+    rfP = {
+      CN: rfCN(),
+      US: rfUS(),
+      JP: rfJP(),
+      DE: rfDE(),
+      IN: rfIN(),
+    };
+  }
+  if (!erpP) {
+    erpP = {
+      CN: erpCN(),
+      US: erpUS(),
+      JP: erpJP(),
+      DE: erpDE(),
+      IN: erpIN(),
+    };
+  }
+}
+
+async function getRf(country){
+  initRfErpMaps();
+  return await rfP[country];
+}
+
+async function getErp(country){
+  initRfErpMaps();
+  return await erpP[country];
+}
+
 // 五个国家/地区的 r_f（10Y）
 async function rfCN(){ return await rfFromInvesting("https://cn.investing.com/rates-bonds/china-10-year-bond-yield",  RF_CN, "CN 10Y"); }
 async function rfUS(){ return await rfFromInvesting("https://www.investing.com/rates-bonds/u.s.-10-year-bond-yield",     RF_US, "US 10Y"); }
