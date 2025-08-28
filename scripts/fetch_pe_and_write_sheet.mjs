@@ -153,44 +153,85 @@ async function readOneCell(range){
    ========================= */
 async function notionSelfTest(){
   if (DRY_NOTION) return console.log("[DRY_NOTION] skip selfTest");
-  const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
-  console.log("[Notion] DB title:", db.title[0]?.plain_text);
-  DB_PROPS = new Set(Object.keys(db.properties));
-  console.log("[Notion] Props:", ...DB_PROPS);
+  if (!NOTION_DB_ASSETS) {
+    console.error("[Notion] 缺少 NOTION_DB_ASSETS"); 
+    return;
+  }
+  try {
+    const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
+    console.log("[Notion] DB title:", db?.title?.[0]?.plain_text || "(no title)");
+    DB_PROPS = new Set(Object.keys(db.properties || {}));
+    console.log("[Notion] Props:", ...DB_PROPS);
+  } catch (e) {
+    console.error("[Notion] retrieve error:", e?.message || e);
+  }
 }
 
-// 简化版 Upsert
-async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }){
-  if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category });
+// ===== 清理旧 Summary =====
+// 把同名资产（历史所有记录）的 Summary 关系清空；当天再重新挂上
+async function clearOldSummaryLinks(assetName) {
+  if (!NOTION_DB_ASSETS) return;
+  try {
+    const r = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: { property: PROP_SIMPLE.Name, title: { equals: assetName } }
+    });
+    for (const page of r.results || []) {
+      await notion.pages.update({
+        page_id: page.id,
+        properties: { Summary: { relation: [] } }  // 清空 relation
+      });
+    }
+  } catch (e) {
+    console.error("[Notion] clearOldSummaryLinks error:", e?.message || e);
+  }
+}
+
+// ===== 简化版 Upsert，带 Summary 清理 & 当天覆盖 =====
+async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
+  if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
   if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
 
-  // 查询是否已有同名 + 日期
-  const q = await notion.databases.query({
-    database_id: NOTION_DB_ASSETS,
-    filter: {
-      and: [
-        { property: PROP_SIMPLE.Name, rich_text: { equals: name } },
-        ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
-      ]
+  try {
+    // 1) 查询是否已有“同名 + 当天”记录
+    const q = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: {
+        and: [
+          { property: PROP_SIMPLE.Name, title: { equals: name } },
+          ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
+        ]
+      }
+    });
+    let pageId = q.results?.[0]?.id;
+
+    // 2) 清理同名资产的历史 Summary（保证 Dashboard 只显示当天）
+    await clearOldSummaryLinks(name);
+
+    // 3) 组装 props（存在才写）
+    const props = {};
+    if (DB_PROPS.has(PROP_SIMPLE.Name))      props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
+    if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
+    if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:    { name: assetType } };
+    if (DB_PROPS.has(PROP_SIMPLE.Category))  props[PROP_SIMPLE.Category]  = { select:    { name: category } };
+    if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date: { start: dateISO } };
+    if (DB_PROPS.has(PROP_SIMPLE.Sort))      props[PROP_SIMPLE.Sort]      = { number: sort };
+
+    // 只给“当天记录”挂 Summary
+    if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
+      props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
     }
-  });
-  let pageId = q.results[0]?.id;
 
-  const props = {};
-  if (DB_PROPS.has(PROP_SIMPLE.Name)) props[PROP_SIMPLE.Name] = { title:[{ text:{ content:name }}]};
-  if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text:[{ text:{ content:valuation }}]};
-  if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:{ name:assetType }};
-  if (DB_PROPS.has(PROP_SIMPLE.Category)) props[PROP_SIMPLE.Category] = { select:{ name:category }};
-  if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date:{ start:dateISO }};
-  if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) props[PROP_SIMPLE.Summary] = { relation:[{ id:summaryId }]};
-  if (DB_PROPS.has(PROP_SIMPLE.Sort)) props[PROP_SIMPLE.Sort] = { number: sort };
-
-  if (pageId){
-    await notion.pages.update({ page_id: pageId, properties: props });
-    console.log("[Notion] update", name);
-  } else {
-    await notion.pages.create({ parent:{ database_id: NOTION_DB_ASSETS }, properties: props });
-    console.log("[Notion] insert", name);
+    // 4) 当天存在 → update；否则 create
+    if (pageId) {
+      await notion.pages.update({ page_id: pageId, properties: props });
+      console.log("[Notion] update", name);
+    } else {
+      await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
+      console.log("[Notion] insert", name);
+    }
+  } catch (e) {
+    console.error("[Notion] upsert error:", e?.message || e);
   }
 }
 
