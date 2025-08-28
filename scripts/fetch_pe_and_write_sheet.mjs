@@ -279,27 +279,24 @@ async function fetchNifty50(){
 
 // 通用抓取：从 Investing.com 抓 10Y，失败就用 fallback
 async function rfFromInvesting(url, fallback, label, allowComma=false){
-  try{
+  try {
     const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:12000 });
-    if(r.ok){
-      const h = await r.text(); let v=null;
-      async function rfFromInvesting(url, fallback, label, allowComma=false){
-  try{
-    const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:12000 });
-    if(r.ok){
-      const h = await r.text(); let v=null;
+    if (r.ok) {
+      const h = await r.text(); 
+      let v = null;
 
       // 精准匹配 instrument-price-last
       const m = h.match(/instrument-price-last[^>]*>([\d.,]+)</i);
-      if (m) v = Number(m[1].replace(/,/g,""))/100;
+      if (m) {
+        v = Number(m[1].replace(/,/g,""))/100;
+      }
 
-      if(Number.isFinite(v) && v>0 && v<1){
+      if (Number.isFinite(v) && v > 0 && v < 1) {
         return { v, tag:"真实", link:`=HYPERLINK("${url}","${label}")` };
       }
     }
-  }catch(_e){}
+  } catch(_e) {}
   return { v: fallback, tag:"兜底", link:"—" };
-}
 }
 
 /* ========= R_f / ERP 全局映射（懒初始化） ========= */
