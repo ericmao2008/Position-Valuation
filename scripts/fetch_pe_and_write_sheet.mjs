@@ -900,85 +900,79 @@ async function runDaily(){
 
 /* =========================
    Dispatcher（子命令入口：
-   MODE 由 dev_preview.yml 的 inputs.mode 传入）
+   MODE 由 dev_preview.yml 的 inputs.mode 传入；
+   也兼容命令行 --mode=xxx）
    ========================= */
 
-// 从 Actions 传入：process.env.MODE（如果没传，默认 full）
-// 也兼容命令行 --mode=xxx 的方式（本地/云端可复用）
-const _MODE = process.env.MODE
-  || ((process.argv.slice(2).find(a => a.startsWith('--mode=')) || '').split('=')[1])
-  || 'full';
+const _MODE =
+  process.env.MODE ||
+  ((process.argv.slice(2).find(a => a.startsWith('--mode=')) || '').split('=')[1]) ||
+  'full';
 
 console.log('[INFO] MODE =', _MODE);
 
 (async () => {
   try {
+    // 只测试 VC 抓取（不会写入外部）
     if (_MODE === 'test-vc') {
-  console.log('[TEST] 只测试 VC 抓取');
+      console.log('[TEST] 只测试 VC 抓取');
 
-  // 1) 抓取 Value Center 的 PE/ROE
-  const vcMap = await fetchVCMapDOM();
-  console.log('[DEBUG] VC map (DOM)', vcMap);
+      const vcMap = await fetchVCMapDOM();
+      console.log('[DEBUG] VC map (DOM)', vcMap);
 
-  // 2) 打印各国家的 10Y 国债收益率（确保 getRf 存在于 runDaily 上方）
-  console.log('[TEST:R_F]');
-  try {
-    console.log('CN:', await getRf('CN')); // 中国10Y
-  } catch (e) { console.log('CN rf error:', e?.message || e); }
-  try {
-    console.log('US:', await getRf('US')); // 美国10Y
-  } catch (e) { console.log('US rf error:', e?.message || e); }
-  try {
-    console.log('JP:', await getRf('JP')); // 日本10Y
-  } catch (e) { console.log('JP rf error:', e?.message || e); }
-  try {
-    console.log('DE:', await getRf('DE')); // 德国10Y
-  } catch (e) { console.log('DE rf error:', e?.message || e); }
-  try {
-    console.log('IN:', await getRf('IN')); // 印度10Y
-  } catch (e) { console.log('IN rf error:', e?.message || e); }
+      // 各国家 10Y
+      console.log('[TEST:R_F]');
+      try { console.log('CN:', await getRf('CN')); } catch (e) { console.log('CN rf error:', e?.message || e); }
+      try { console.log('US:', await getRf('US')); } catch (e) { console.log('US rf error:', e?.message || e); }
+      try { console.log('JP:', await getRf('JP')); } catch (e) { console.log('JP rf error:', e?.message || e); }
+      try { console.log('DE:', await getRf('DE')); } catch (e) { console.log('DE rf error:', e?.message || e); }
+      try { console.log('IN:', await getRf('IN')); } catch (e) { console.log('IN rf error:', e?.message || e); }
 
-  // 3) 还可以按指数映射打印“指数→所属国家→其 r_f”
-  console.log('[TEST:Index → Country → r_f]');
-  for (const [code, t] of Object.entries(VC_TARGETS)) {
-    try {
-      const rf = await getRf(t.country);
-      console.log(`${t.label} (${t.country}) → r_f=${(rf?.v*100).toFixed(2)}%`);
-    } catch (e) {
-      console.log(`${t.label} (${t.country}) → rf error:`, e?.message || e);
+      // 指数 → 国家 → r_f
+      console.log('[TEST:Index → Country → r_f]');
+      for (const [code, t] of Object.entries(VC_TARGETS)) {
+        try {
+          const rf = await getRf(t.country);
+          console.log(`${t.label} (${t.country}) → r_f=${(rf?.v * 100).toFixed(2)}%`);
+        } catch (e) {
+          console.log(`${t.label} (${t.country}) → rf error:`, e?.message || e);
+        }
+      }
+      return;
     }
-  }
 
-  // 4) 结束测试
-  return;
-}
-
+    // 只测试 Nifty50 抓取
     if (_MODE === 'test-nifty') {
       console.log('[TEST] 只测试 Nifty 50 抓取');
-      await testNifty();
+      const nifty = await fetchNifty50();
+      console.log('[TEST:NIFTY]', nifty);
       return;
     }
 
+    // 只写 Google Sheet（是否真写由 DRY_SHEET 控制）
     if (_MODE === 'test-sheet') {
-      console.log('[TEST] 只测试写 Google Sheet（建议在工作流里 DRY_SHEET=0，其它 DRY=1）');
-      await runDaily();   // 是否真写由 env: DRY_* 控制
+      console.log('[TEST] 只测试写 Google Sheet（DRY_SHEET=0 才会真写入）');
+      await runDaily();
       return;
     }
 
+    // 只写 Notion（建议 DRY_SHEET=1, DRY_MAIL=1）
     if (_MODE === 'test-notion') {
       console.log('[TEST] 只测试写 Notion（建议 DRY_SHEET=1, DRY_MAIL=1）');
       await runDaily();
       return;
     }
 
+    // 只发邮件（建议 DRY_MAIL=0，其他 DRY=1）
     if (_MODE === 'test-mail') {
-      console.log('[TEST] 只测试邮件（建议 DRY_MAIL=0，其它 DRY=1）');
+      console.log('[TEST] 只测试邮件发送（DRY_MAIL=0 才会真发）');
       await sendEmailIfEnabled(['这是一封测试邮件', '第二行']);
       return;
     }
 
     // 默认：整条流水线
     await runDaily();
+
   } catch (e) {
     console.error(e);
     process.exit(1);
