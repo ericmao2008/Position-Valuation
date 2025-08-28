@@ -658,26 +658,6 @@ async function runDaily(){
     try { vcMap = await fetchVCMapDOM(); } catch(e){ dbg("VC DOM err", e.message); vcMap = {}; }
   }
 
-// 统一的 rf/erp Promise 映射（只初始化一次）
-const rfP = {
-  CN: rfCN(),
-  US: rfUS(),
-  JP: rfJP(),
-  DE: rfDE(),
-  IN: rfIN(),
-};
-const erpP = {
-  CN: erpCN(),
-  US: erpUS(),
-  JP: erpJP(),
-  DE: erpDE(),
-  IN: erpIN(),
-};
-
-// 一个小工具：根据 VC_TARGETS 的 country 取对应 r_f / ERP
-async function getRf(country){ return await rfP[country]; }
-async function getErp(country){ return await erpP[country]; }
-
   // --- "全市场宽基" Title ---
   await write(`'${sheetTitle}'!A${row}:E${row}`, [["全市场宽基"]]);
   if (!DRY_SHEET) {
