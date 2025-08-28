@@ -73,6 +73,76 @@ const auth = new google.auth.JWT(
   ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
 );
 const sheets = new google.sheets({ version:"v4", auth });
+/* =========================
+   Google Sheet 操作封装（顶层可用）
+   ========================= */
+async function ensureToday(){
+  if (DRY_SHEET) return { sheetTitle: todayStr(), sheetId: 0 };
+  const title = todayStr();
+  const meta  = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+  let sh = meta.data.sheets?.find(s => s.properties?.title === title);
+  if (!sh) {
+    const add = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title } } }] }
+    });
+    sh = { properties: add.data.replies[0].addSheet.properties };
+  }
+  return { sheetTitle: title, sheetId: sh.properties.sheetId };
+}
+
+async function write(range, rows){
+  if (DRY_SHEET) {
+    console.log("[DRY_SHEET write]", range, rows.length, "rows");
+    return;
+  }
+  dbg("Sheet write", range, "rows:", rows.length);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range,
+    valueInputOption:"USER_ENTERED",
+    requestBody:{ values: rows }
+  });
+}
+
+async function clearTodaySheet(sheetTitle, sheetId){
+  if (DRY_SHEET) {
+    console.log("[DRY_SHEET clear]", sheetTitle);
+    return;
+  }
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range:`'${sheetTitle}'!A:Z`
+  });
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range:{ sheetId, startRowIndex:0, endRowIndex:2000, startColumnIndex:0, endColumnIndex:26 },
+            cell:{ userEnteredFormat:{} },
+            fields:"userEnteredFormat"
+          }
+        },
+        {
+          updateBorders: {
+            range:{ sheetId, startRowIndex:0, endRowIndex:2000, startColumnIndex:0, endColumnIndex:26 },
+            top:{style:"NONE"}, bottom:{style:"NONE"}, left:{style:"NONE"}, right:{style:"NONE"},
+            innerHorizontal:{style:"NONE"}, innerVertical:{style:"NONE"}
+          }
+        }
+      ]
+    }
+  });
+}
+
+async function readOneCell(range){
+  if (DRY_SHEET) return ""; // DRY 模式不读表
+  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
+  const v = r.data.values?.[0]?.[0];
+  return (v==null || v==="") ? "" : String(v);
+}
 
 /* =========================
    Notion 初始化（极简同步）
