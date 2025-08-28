@@ -1,0 +1,56 @@
+# Position Valuation Tool
+
+自动抓取全球主要指数 + 个股估值，写入 Google Sheet，并同步到 Notion 数据库。
+
+## Features
+- **指数估值**  
+  - 沪深300 / 标普500 / 纳指100 / 德国DAX / 日经225 / Nifty50 / 行业指数
+  - 抓取 P/E, ROE, r_f, ERP*，计算买点、卖点、合理区间
+- **个股估值**  
+  - 腾讯控股、贵州茅台、分众传媒（可扩展）
+  - 折扣率计算（市值/合理估值）
+- **数据写入**
+  - Google Sheet：每日新建一张当日日期命名的 sheet
+  - Notion：写入 `资产配置库` 数据库
+    - Name + Date 唯一（当日覆盖）
+    - 清理历史 Summary，只挂今天
+
+## Requirements
+- Node.js v20+
+- Google Service Account
+- Notion integration
+
+## Setup
+
+1. **配置 Secrets / Vars**（在 GitHub 仓库 Settings → Secrets and variables）：
+   - Google API:
+     - `GOOGLE_CLIENT_EMAIL`
+     - `GOOGLE_PRIVATE_KEY`
+     - `SPREADSHEET_ID`
+   - Notion:
+     - `NOTION_TOKEN`
+     - `NOTION_DB_ASSETS`（资产配置库 ID）
+     - `NOTION_SUMMARY_PAGE_ID`（Summary 页面 ID）
+   - Mail (可选):
+     - `SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS`
+     - `MAIL_TO, MAIL_FROM_NAME`
+
+2. **运行方式**
+   - GitHub Actions 自动执行（`.github/workflows/daily_valuation.yml`）
+   - 或手动触发：
+     ```bash
+     node scripts/fetch_pe_and_write_sheet.mjs --mode=test-vc
+     ```
+
+3. **调试模式**
+   - `MODE=test-vc`   → 只抓指数  
+   - `MODE=test-sheet` → 只写 Google Sheet  
+   - `MODE=test-notion` → 只写 Notion  
+   - `MODE=test-mail`   → 只发邮件  
+
+4. **DRY 开关**
+   - `DRY_SHEET=1` → 不写 Google Sheet  
+   - `DRY_NOTION=1` → 不写 Notion  
+   - `DRY_MAIL=1` → 不发邮件  
+
+## Directory
