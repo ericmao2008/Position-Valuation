@@ -283,20 +283,23 @@ async function rfFromInvesting(url, fallback, label, allowComma=false){
     const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:12000 });
     if(r.ok){
       const h = await r.text(); let v=null;
-      // 兼容 12.34 或 12,34
-      const m1 = allowComma ? h.match(/(\d{1,2}[.,]\d{1,4})</i) : h.match(/(\d{1,2}\.\d{1,4})</i);
-      if (m1) v = Number(String(m1[1]).replace(',','.'))/100;
-      if(!Number.isFinite(v)){
-        const plain = h.replace(/<[^>]+>/g," ");
-        const m2 = plain.match(/(\d{1,2}[.,]?\d{0,4})\s*%/);
-        if (m2) v = Number(String(m2[1]).replace(',','.'))/100;
-      }
+      async function rfFromInvesting(url, fallback, label, allowComma=false){
+  try{
+    const r = await fetch(url, { headers:{ "User-Agent": UA, "Referer":"https://www.google.com" }, timeout:12000 });
+    if(r.ok){
+      const h = await r.text(); let v=null;
+
+      // 精准匹配 instrument-price-last
+      const m = h.match(/instrument-price-last[^>]*>([\d.,]+)</i);
+      if (m) v = Number(m[1].replace(/,/g,""))/100;
+
       if(Number.isFinite(v) && v>0 && v<1){
         return { v, tag:"真实", link:`=HYPERLINK("${url}","${label}")` };
       }
     }
   }catch(_e){}
   return { v: fallback, tag:"兜底", link:"—" };
+}
 }
 
 /* ========= R_f / ERP 全局映射（懒初始化） ========= */
