@@ -175,29 +175,38 @@ function numOr(v,d){ if(v==null) return d; const s=String(v).trim(); if(!s) retu
 
 /* =========================
    股票价格获取（替代 Google Sheet 内公式）
+   规则：
+   - 上交所/深交所（SHA/SHE）→ 新浪接口
+   - 其它（HKG/NASDAQ/NYSE/...）→ Google Finance
    ========================= */
 
-// 将 Ticker 转新浪代码：SHA:600519 -> sh600519；SHE:002027 -> sz002027
-function toSinaCode(ticker) {
+// 拆分交易所/代码
+function splitTicker(ticker){
   const [ex, code] = String(ticker||"").split(":");
+  return { ex, code };
+}
+
+// 将 A 股 Ticker 转新浪代码：SHA:600519 -> sh600519；SHE:002027 -> sz002027
+function toSinaCode(ticker) {
+  const { ex, code } = splitTicker(ticker);
   if (!ex || !code) return null;
   if (ex === 'SHA') return 'sh' + code;
   if (ex === 'SHE') return 'sz' + code;
   return null;
 }
 
-// 抓取新浪接口价格（A股最快、最稳定）
+// 抓取新浪接口价格（A股）
 async function fetchSinaPrice(sinaCode) {
   if (!sinaCode) return null;
   const url = `http://hq.sinajs.cn/list=${sinaCode}`;
   try {
     const r = await fetch(url, { headers: { "Referer": "https://finance.sina.com.cn" } });
-    const txt = await r.text();         // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,...";
+    const txt = await r.text(); // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,...";
     const m = txt.match(/"([^"]+)"/);
     if (m && m[1]) {
       const parts = m[1].split(",");
-      const price = parseFloat(parts[3]);   // 第4项是最新价
-      if (Number.isFinite(price)) return price;
+      const price = parseFloat(parts[3]); // 第 4 项通常为最新价
+      if (Number.isFinite(price) && price > 0) return price;
     }
   } catch (e) {
     console.error("[SinaPrice error]", sinaCode, e?.message || e);
@@ -205,41 +214,18 @@ async function fetchSinaPrice(sinaCode) {
   return null;
 }
 
-// === Yahoo Finance 抓价（更稳） ===
-// 映射：HKG:0700 -> 0700.HK；NASDAQ:AAPL -> AAPL；NYSE:TSLA -> TSLA
-function toYahooSymbol(ticker) {
-  const [ex, code] = String(ticker||"").split(":");
-  if (!ex || !code) return null;
-  if (ex === "HKG")    return `${code.padStart(4,'0')}.HK`; // 0700.HK
-  if (ex === "NASDAQ" || ex === "NYSE") return code;
-  return null;
-}
-async function fetchYahooPrice(ticker) {
-  const ysym = toYahooSymbol(ticker);
-  if (!ysym) return null;
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(ysym)}`;
-  try {
-    const r = await fetch(url, { headers: { "User-Agent": UA } });
-    const j = await r.json();
-    const p = j?.quoteResponse?.result?.[0]?.regularMarketPrice;
-    if (Number.isFinite(p)) return p;
-  } catch(e) {
-    console.error("[YahooPrice error]", ticker, e?.message || e);
-  }
-  return null;
-}
-
-// 抓取 Google Finance（兜底）
+// 抓取 Google Finance（HKG/US 等）
 async function fetchGooglePrice(ticker) {
+  // 例：HKG:0700 -> https://www.google.com/finance/quote/HKG:0700
   const url = `https://www.google.com/finance/quote/${ticker.replace(':',':')}`;
   try {
     const r = await fetch(url, { headers: { "User-Agent": UA } });
     const html = await r.text();
-    // "price":{"raw":122.34}
+    // 简单解析 "price":{"raw":122.34}
     const m = html.match(/"price"\s*:\s*\{\s*"raw"\s*:\s*([\d.]+)/i);
     if (m) {
       const price = parseFloat(m[1]);
-      if (Number.isFinite(price)) return price;
+      if (Number.isFinite(price) && price > 0) return price;
     }
   } catch (e) {
     console.error("[GooglePrice error]", ticker, e?.message || e);
@@ -247,25 +233,23 @@ async function fetchGooglePrice(ticker) {
   return null;
 }
 
-// 统一对外：优先 A股（新浪）→ 再试 Yahoo（HKG/US）→ 最后 Google（兜底）
+// 统一对外：A 股 → 新浪；其它 → Google
 async function fetchPrice(ticker) {
-  // 可选：环境变量兜底（例如 PRICE_OVERRIDE_SHA_600519）
+  // 可选的环境变量兜底：PRICE_OVERRIDE_SHA_600519 / PRICE_OVERRIDE_HKG_0700 等
   const envKey = `PRICE_OVERRIDE_${ticker.replace(/[:.]/g,'_')}`;
   const envVal = process.env[envKey];
   if (envVal && Number.isFinite(Number(envVal))) return Number(envVal);
 
-  // A 股优先新浪
-  const sina = toSinaCode(ticker);
-  if (sina) {
-    const p = await fetchSinaPrice(sina);
+  const { ex } = splitTicker(ticker);
+
+  if (ex === 'SHA' || ex === 'SHE') {
+    const sinaCode = toSinaCode(ticker);
+    const p = await fetchSinaPrice(sinaCode);
     if (p != null) return p;
+    return null; // A股不再兜底 Google，避免混淆
   }
 
-  // 港/美股优先 Yahoo
-  const y = await fetchYahooPrice(ticker);
-  if (y != null) return y;
-
-  // 最后兜底 Google HTML
+  // 非 A 股：用 Google Finance
   return await fetchGooglePrice(ticker);
 }
 
@@ -275,7 +259,7 @@ async function fetchPrice(ticker) {
 async function notionSelfTest(){
   if (DRY_NOTION) return console.log("[DRY_NOTION] skip selfTest");
   if (!NOTION_DB_ASSETS) {
-    console.error("[Notion] 缺少 NOTION_DB_ASSETS"); 
+    console.error("[Notion] 缺少 NOTION_DB_ASSETS");
     return;
   }
   try {
@@ -283,6 +267,15 @@ async function notionSelfTest(){
     console.log("[Notion] DB title:", db?.title?.[0]?.plain_text || "(no title)");
     DB_PROPS = new Set(Object.keys(db.properties || {}));
     console.log("[Notion] Props:", ...DB_PROPS);
+    if (!DB_PROPS.has(PROP_SIMPLE.Name) || !DB_PROPS.has(PROP_SIMPLE.Date)) {
+      console.warn("[Notion] 提示：数据库里需要有 Name(title) 和 Date(date) 字段。");
+    }
+    if (!DB_PROPS.has(PROP_SIMPLE.Summary)) {
+      console.warn("[Notion] 提示：未检测到 Summary(relation) 字段，今天的链接将不会建立。");
+    }
+    if (!NOTION_SUMMARY_PAGE_ID) {
+      console.warn("[Notion] NOTION_SUMMARY_PAGE_ID 为空：今天的 Summary 不会挂。");
+    }
   } catch (e) {
     console.error("[Notion] retrieve error:", e?.message || e);
   }
@@ -378,6 +371,8 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
     // 只给当天这条挂 Summary（summaryId 建议传 NOTION_SUMMARY_PAGE_ID；必须是某个 DB 行的 page id）
     if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
       props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
+    } else if (DB_PROPS.has(PROP_SIMPLE.Summary)) {
+      console.warn(`[Notion] 未设置 NOTION_SUMMARY_PAGE_ID，今天的 Summary 不会挂：${name}`);
     }
 
     // 4) 当天存在 → update；否则 create
@@ -1072,7 +1067,7 @@ async function runDaily(){
 
   const lines = [...indexLines, ...stockLines];
 
-  // ====== Notion 极简同步（带排序 & Summary）======
+   // ====== Notion 极简同步（带排序 & Summary）======
   const isoDate = todayStr();
   const simpleRows = [
     { name:"沪深300",            valuation: indexLines[0], assetType:"指数", category:"宽基指数", sort: 10 },
@@ -1095,10 +1090,17 @@ async function runDaily(){
       sort: base + i,
     });
   }
+
+  // 逐条 Upsert（同名+当天覆盖）+ 仅今天挂 Summary；随后再去重兜底
   for (const r of simpleRows) {
     await upsertSimpleRow({
-      name: r.name, valuation: r.valuation, assetType: r.assetType, category: r.category,
-      dateISO: isoDate, summaryId: NOTION_SUMMARY_PAGE_ID, sort: r.sort
+      name: r.name,
+      valuation: r.valuation,
+      assetType: r.assetType,
+      category: r.category,
+      dateISO: isoDate,
+      summaryId: NOTION_SUMMARY_PAGE_ID,  // ★ 只有今天挂 Summary
+      sort: r.sort
     });
   }
 
