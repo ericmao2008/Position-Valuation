@@ -56,6 +56,7 @@ jobs:
       # ===== Notion =====
       NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
       NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
+      NOTION_SUMMARY_PAGE_ID:  ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
 
     steps:
       - name: Checkout
