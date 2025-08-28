@@ -161,7 +161,6 @@ const PROP_SIMPLE = {
   Summary: "Summary", // Relation（可选）
   Sort: "Sort",       // Number（可选，用于固定排序）
 };
-let DB_PROPS = new Set();
 
 /* =========================
    工具函数
