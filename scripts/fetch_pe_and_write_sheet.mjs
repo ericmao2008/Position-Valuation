@@ -896,10 +896,44 @@ console.log('[INFO] MODE =', _MODE);
 (async () => {
   try {
     if (_MODE === 'test-vc') {
-      console.log('[TEST] 只测试 VC 抓取');
-      await testVC();
-      return;
+  console.log('[TEST] 只测试 VC 抓取');
+
+  // 1) 抓取 Value Center 的 PE/ROE
+  const vcMap = await fetchVCMapDOM();
+  console.log('[DEBUG] VC map (DOM)', vcMap);
+
+  // 2) 打印各国家的 10Y 国债收益率（确保 getRf 存在于 runDaily 上方）
+  console.log('[TEST:R_F]');
+  try {
+    console.log('CN:', await getRf('CN')); // 中国10Y
+  } catch (e) { console.log('CN rf error:', e?.message || e); }
+  try {
+    console.log('US:', await getRf('US')); // 美国10Y
+  } catch (e) { console.log('US rf error:', e?.message || e); }
+  try {
+    console.log('JP:', await getRf('JP')); // 日本10Y
+  } catch (e) { console.log('JP rf error:', e?.message || e); }
+  try {
+    console.log('DE:', await getRf('DE')); // 德国10Y
+  } catch (e) { console.log('DE rf error:', e?.message || e); }
+  try {
+    console.log('IN:', await getRf('IN')); // 印度10Y
+  } catch (e) { console.log('IN rf error:', e?.message || e); }
+
+  // 3) 还可以按指数映射打印“指数→所属国家→其 r_f”
+  console.log('[TEST:Index → Country → r_f]');
+  for (const [code, t] of Object.entries(VC_TARGETS)) {
+    try {
+      const rf = await getRf(t.country);
+      console.log(`${t.label} (${t.country}) → r_f=${(rf?.v*100).toFixed(2)}%`);
+    } catch (e) {
+      console.log(`${t.label} (${t.country}) → rf error:`, e?.message || e);
     }
+  }
+
+  // 4) 结束测试
+  return;
+}
 
     if (_MODE === 'test-nifty') {
       console.log('[TEST] 只测试 Nifty 50 抓取');
