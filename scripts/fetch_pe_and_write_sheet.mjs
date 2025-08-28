@@ -263,13 +263,12 @@ async function notionSelfTest(){
   }
 }
 
-/**
- * 清理同名资产的历史 Summary：把所有“同名”的页面 Summary 关系清空
- * 这样 Dashboard 只会显示当天挂了 Summary 的那一条
+/* ===== 清理同名资产“历史 Summary” =====
+ * 把“同名”的所有历史记录 Summary 关系清空，确保 Dashboard 只显示今天这一条
  */
 async function clearOldSummaryLinks(assetName) {
   if (!NOTION_DB_ASSETS) return;
-  if (!DB_PROPS.has(PROP_SIMPLE.Summary)) return;   // 没有 Summary 字段就不用清理
+  if (!DB_PROPS.has(PROP_SIMPLE.Summary)) return;
   try {
     const r = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
@@ -278,7 +277,7 @@ async function clearOldSummaryLinks(assetName) {
     for (const page of r.results || []) {
       await notion.pages.update({
         page_id: page.id,
-        properties: { [PROP_SIMPLE.Summary]: { relation: [] } }
+        properties: { [PROP_SIMPLE.Summary]: { relation: [] } }  // 清空 relation
       });
     }
   } catch (e) {
@@ -286,57 +285,95 @@ async function clearOldSummaryLinks(assetName) {
   }
 }
 
-/**
- * 同名 + 同日 去重（删除旧的）：
- * - 保留最近编辑的一条，其余“真删除”
- * - 返回保留的 pageId（如果只有一条或不存在，则返回 undefined）
+/* ===== 同名 + 同日 去重（归档旧的，只保留 1 条） =====
+ * - Notion API 对“删除”是归档（archived:true）
+ * - 先按 last_edited_time 降序取回；保留第 1 条，其余归档
+ * - 返回“保留”的 pageId（只有 1 条/无记录时也返回那条或 undefined）
  */
 async function dedupeSameDay(name, dateISO) {
   if (!NOTION_DB_ASSETS || !dateISO) return;
-
   try {
-    // 拉取当日的所有同名记录（必要时分页）
-    const pages = [];
-    let cursor = undefined;
-    do {
-      const res = await notion.databases.query({
-        database_id: NOTION_DB_ASSETS,
-        filter: {
-          and: [
-            { property: PROP_SIMPLE.Name, title: { equals: name } },
-            { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
-          ]
-        },
-        sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-        start_cursor: cursor
-      });
-      pages.push(...(res.results || []));
-      cursor = res.has_more ? res.next_cursor : undefined;
-    } while (cursor);
+    const res = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: { and: [
+        { property: PROP_SIMPLE.Name, title: { equals: name } },
+        { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
+      ]},
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+    });
 
+    const pages = res.results || [];
     if (pages.length <= 1) return pages[0]?.id;
 
-    const keep = pages[0].id; // 保留最近编辑的一条
+    const keep = pages[0].id; // 保留最新的一条
     for (let i = 1; i < pages.length; i++) {
-      const id = pages[i].id;
-      try {
-        // ① 直接删除（不可恢复，谨慎）
-        await notion.blocks.delete({ block_id: id });
-        console.log("[Notion] delete dup (hard)", name, id);
-      } catch (e) {
-        // ② 如果接口受限/失败，退回“归档”兜底
-        console.warn("[Notion] hard delete failed, archive instead:", id, e?.message || e);
-        try {
-          await notion.pages.update({ page_id: id, archived: true });
-          console.log("[Notion] archive dup (fallback)", name, id);
-        } catch (e2) {
-          console.error("[Notion] archive dup failed:", id, e2?.message || e2);
-        }
-      }
+      await notion.pages.update({ page_id: pages[i].id, archived: true });
+      console.log("[Notion] archive duplicate", name, pages[i].id);
     }
     return keep;
   } catch (e) {
     console.error("[Notion] dedupeSameDay error:", e?.message || e);
+  }
+}
+
+/* ===== Upsert（Name + Date 唯一）=====
+ * - 写入前：先做“当日去重”(归档旧的) + 清理同名历史 Summary
+ * - 当天记录：仅今天这一条挂 Summary（需 DB 有同名 relation 字段 & 传 summaryId）
+ * - 若存在“同名+当天”记录：update；否则 create
+ * - 可写入 Sort 固定排序
+ */
+async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
+  if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
+  if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
+
+  try {
+    // 1) 先把“同名 + 当天”的旧项归档，只保留 1 条
+    await dedupeSameDay(name, dateISO);
+
+    // 2) 再把“同名”的历史 Summary 清空，保证 Dashboard 只显示今天
+    await clearOldSummaryLinks(name);
+
+    // 3) 查询是否已有“同名 + 当天”记录（去重后这里最多 1 条）
+    const q = await notion.databases.query({
+      database_id: NOTION_DB_ASSETS,
+      filter: {
+        and: [
+          { property: PROP_SIMPLE.Name, title: { equals: name } },
+          ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
+        ]
+      },
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
+    });
+    let pageId = q.results?.[0]?.id;
+
+    // 4) 组装 props（仅写存在的字段；避免字段在 DB 里不存在时报错）
+    const props = {};
+    if (DB_PROPS.has(PROP_SIMPLE.Name))      props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
+    if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
+    if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:    { name: assetType } };
+    if (DB_PROPS.has(PROP_SIMPLE.Category))  props[PROP_SIMPLE.Category]  = { select:    { name: category } };
+    if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date: { start: dateISO } };
+    if (DB_PROPS.has(PROP_SIMPLE.Sort))      props[PROP_SIMPLE.Sort]      = { number: sort };
+
+    // 只给“当天这一条”挂 Summary
+    if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
+      props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
+    }
+
+    // 5) 当天存在 → update；否则 create
+    if (pageId) {
+      await notion.pages.update({ page_id: pageId, properties: props });
+      console.log("[Notion] update", name);
+    } else {
+      await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
+      console.log("[Notion] insert", name);
+    }
+
+    // 6) 再兜底做一次“同日去重”（防止竞态）
+    await dedupeSameDay(name, dateISO);
+
+  } catch (e) {
+    console.error("[Notion] upsert error:", e?.message || e);
   }
 }
 
