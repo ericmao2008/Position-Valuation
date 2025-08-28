@@ -287,25 +287,52 @@ async function clearOldSummaryLinks(assetName) {
 }
 
 /**
- * 同名 + 同日 去重：保留最近编辑的一条，其余归档
- * 返回保留的 pageId（如果只有一条或不存在，则返回 undefined）
+ * 同名 + 同日 去重（删除旧的）：
+ * - 保留最近编辑的一条，其余“真删除”
+ * - 返回保留的 pageId（如果只有一条或不存在，则返回 undefined）
  */
 async function dedupeSameDay(name, dateISO) {
   if (!NOTION_DB_ASSETS || !dateISO) return;
+
   try {
-    const res = await notion.databases.query({
-      database_id: NOTION_DB_ASSETS,
-      filter: { and: [
-        { property: PROP_SIMPLE.Name, title: { equals: name } },
-        { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
-      ]},
-      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
-    });
-    const pages = res.results || [];
+    // 拉取当日的所有同名记录（必要时分页）
+    const pages = [];
+    let cursor = undefined;
+    do {
+      const res = await notion.databases.query({
+        database_id: NOTION_DB_ASSETS,
+        filter: {
+          and: [
+            { property: PROP_SIMPLE.Name, title: { equals: name } },
+            { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
+          ]
+        },
+        sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+        start_cursor: cursor
+      });
+      pages.push(...(res.results || []));
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+
     if (pages.length <= 1) return pages[0]?.id;
-    const keep = pages[0].id;
+
+    const keep = pages[0].id; // 保留最近编辑的一条
     for (let i = 1; i < pages.length; i++) {
-      await notion.pages.update({ page_id: pages[i].id, archived: true });
+      const id = pages[i].id;
+      try {
+        // ① 直接删除（不可恢复，谨慎）
+        await notion.blocks.delete({ block_id: id });
+        console.log("[Notion] delete dup (hard)", name, id);
+      } catch (e) {
+        // ② 如果接口受限/失败，退回“归档”兜底
+        console.warn("[Notion] hard delete failed, archive instead:", id, e?.message || e);
+        try {
+          await notion.pages.update({ page_id: id, archived: true });
+          console.log("[Notion] archive dup (fallback)", name, id);
+        } catch (e2) {
+          console.error("[Notion] archive dup failed:", id, e2?.message || e2);
+        }
+      }
     }
     return keep;
   } catch (e) {
