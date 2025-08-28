@@ -1,0 +1,33 @@
+# Development Log — Position Valuation Tool
+
+## Version History
+- **V6.0.0**
+  - 单文件模块化：将脚本 `fetch_pe_and_write_sheet.mjs` 拆分为逻辑区块。
+  - 增加 MODE 子命令：`--mode=test-vc/test-nifty/test-sheet/test-notion/test-mail`，便于分模块调试。
+  - 增加 DRY 开关：`DRY_SHEET/DRY_NOTION/DRY_MAIL`，开发期不落地。
+  - 股票价格：A 股 → 新浪 API 数值，其它交易所 → GoogleFinance 公式。
+  - Notion 极简同步：
+    - Name + Date 唯一（当日覆盖，不重复新建）
+    - 清理历史 Summary，只挂今天
+    - 增加 `dedupeSameDay`，避免同一天多条记录
+  - 支持 Summary Page relation，Dashboard 只显示当日最新。
+
+## Key Fixes / Issues
+- **价格获取问题**  
+  - 腾讯控股（港股）以前显示 0，改为使用 GoogleFinance 公式 `=GOOGLEFINANCE("HKG:0700","price")`。
+  - A 股使用新浪 API `http://hq.sinajs.cn/list=sh600519` 等，返回数值写入。
+
+- **Notion 数据覆盖问题**  
+  - 原先同一天会产生多条（如多个腾讯控股），现在逻辑是：
+    1. 写入前调用 `dedupeSameDay`（保留最新，归档旧的）。
+    2. 清空历史 Summary。
+    3. 当天只更新/插入一条，并挂上 Summary。
+
+- **重复声明 Bug**  
+  - 出现 `DB_PROPS 已声明` 错误，原因是重复复制粘贴。  
+  - 解决方案：删除多余的 `let DB_PROPS` 和旧版 `upsertSimpleRow`、`notionSelfTest`。
+
+## Lessons
+1. 功能逐块测试（MODE=test-*）大幅加快开发，避免每次跑整条流水线。
+2. Notion 集成必须给脚本“Summary”字段权限，否则无法建立关系。
+3. 开发期推荐使用 `dev_preview.yml` 临时 workflow，避免影响主线。
