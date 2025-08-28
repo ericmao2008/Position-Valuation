@@ -104,48 +104,68 @@ function todayStr(){
 function numOr(v,d){ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; }
 
 /* =========================
-   Google Sheet 操作封装
+   股票价格获取（替代 Google Sheet 内公式）
    ========================= */
-async function ensureToday(){
-  if (DRY_SHEET) return { sheetTitle: todayStr(), sheetId: 0 };
-  const title=todayStr();
-  const meta=await sheets.spreadsheets.get({ spreadsheetId:SPREADSHEET_ID });
-  let sh=meta.data.sheets?.find(s=>s.properties?.title===title);
-  if(!sh){
-    const add=await sheets.spreadsheets.batchUpdate({
-      spreadsheetId:SPREADSHEET_ID, requestBody:{ requests:[{ addSheet:{ properties:{ title }}}] }
-    });
-    sh={ properties:add.data.replies[0].addSheet.properties };
-  }
-  return { sheetTitle:title, sheetId:sh.properties.sheetId };
+
+// 将 Ticker 转新浪代码：SHA:600519 -> sh600519；SHE:002027 -> sz002027
+function toSinaCode(ticker) {
+  const [ex, code] = String(ticker||"").split(":");
+  if (!ex || !code) return null;
+  if (ex === 'SHA') return 'sh' + code;
+  if (ex === 'SHE') return 'sz' + code;
+  return null;
 }
 
-async function write(range, rows){
-  if (DRY_SHEET) return console.log("[DRY_SHEET write]", range, rows.length, "rows");
-  dbg("Sheet write", range, "rows:", rows.length);
-  await sheets.spreadsheets.values.update({
-    spreadsheetId:SPREADSHEET_ID, range, valueInputOption:"USER_ENTERED",
-    requestBody:{ values: rows }
-  });
+// 抓取新浪接口价格（A股最快、最稳定）
+async function fetchSinaPrice(sinaCode) {
+  if (!sinaCode) return null;
+  const url = `http://hq.sinajs.cn/list=${sinaCode}`;
+  try {
+    const r = await fetch(url, { headers: { "Referer": "https://finance.sina.com.cn" } });
+    const txt = await r.text();         // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,....";
+    const m = txt.match(/"([^"]+)"/);
+    if (m && m[1]) {
+      const parts = m[1].split(",");
+      const price = parseFloat(parts[3]);   // 第4项是最新价
+      if (Number.isFinite(price)) return price;
+    }
+  } catch (e) {
+    console.error("[SinaPrice error]", sinaCode, e?.message || e);
+  }
+  return null;
 }
-async function clearTodaySheet(sheetTitle, sheetId){
-  if (DRY_SHEET) return console.log("[DRY_SHEET clear]", sheetTitle);
-  await sheets.spreadsheets.values.clear({ spreadsheetId:SPREADSHEET_ID, range:`'${sheetTitle}'!A:Z` });
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: { requests: [
-      { repeatCell: { range:{ sheetId, startRowIndex:0, endRowIndex:2000, startColumnIndex:0, endColumnIndex:26 }, cell:{ userEnteredFormat:{} }, fields:"userEnteredFormat" } },
-      { updateBorders: { range:{ sheetId, startRowIndex:0, endRowIndex:2000, startColumnIndex:0, endColumnIndex:26 },
-        top:{style:"NONE"}, bottom:{style:"NONE"}, left:{style:"NONE"}, right:{style:"NONE"},
-        innerHorizontal:{style:"NONE"}, innerVertical:{style:"NONE"} } }
-    ]}
-  });
+
+// 抓取 Google Finance（HKG/US 等；简单解析）
+async function fetchGooglePrice(ticker) {
+  const url = `https://www.google.com/finance/quote/${ticker.replace(':',':')}`;
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": UA } });
+    const html = await r.text();
+    // "price":{"raw":122.34  或  "price":{"raw":122}
+    const m = html.match(/"price"\s*:\s*\{\s*"raw"\s*:\s*([\d.]+)/i);
+    if (m) {
+      const price = parseFloat(m[1]);
+      if (Number.isFinite(price)) return price;
+    }
+  } catch (e) {
+    console.error("[GooglePrice error]", ticker, e?.message || e);
+  }
+  return null;
 }
-async function readOneCell(range){
-  if (DRY_SHEET) return ""; // DRY 模式下不读
-  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range });
-  const v = r.data.values?.[0]?.[0];
-  return (v==null || v==="") ? "" : String(v);
+
+// 统一对外：优先 A股（新浪），否则 Google Finance（HKG/US 等）
+async function fetchPrice(ticker) {
+  // 允许通过环境变量强制覆盖（开发/兜底时有用）
+  const envKey = `PRICE_OVERRIDE_${ticker.replace(/[:.]/g,'_')}`; // 例如 PRICE_OVERRIDE_SHA_600519
+  const envVal = process.env[envKey];
+  if (envVal && Number.isFinite(Number(envVal))) return Number(envVal);
+
+  const sina = toSinaCode(ticker);
+  if (sina) {
+    const p = await fetchSinaPrice(sina);
+    if (p != null) return p;
+  }
+  return await fetchGooglePrice(ticker);   // HKG/NYSE/NASDAQ 等
 }
 
 /* =========================
@@ -634,9 +654,10 @@ async function writeStockBlock(startRow, cfg) {
     billionRows.forEach(rIdx => { requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } }); });
     // 总股本（亿，2位小数）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    // 价格
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
-    // 合理PE（整数）
+    // 价格：用脚本抓取的数值，替代谷歌/新浪公式
+const priceVal = await fetchPrice(ticker);
+const priceCell = Number.isFinite(priceVal) ? priceVal : "";
+rows[1] = ["价格", priceCell, "数值", "实时价格", priceVal!=null ? "API" : "—"];
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
     // 增速（%）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
