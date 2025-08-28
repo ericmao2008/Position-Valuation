@@ -19,7 +19,7 @@ jobs:
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
       NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
       NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
-      NOTION_SUMMARY_PAGE_ID: ${{ vars.NOTION_SUMMARY_PAGE_ID }}
+      NOTION_SUMMARY_PAGE_ID: ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
       SMTP_HOST:           ${{ secrets.SMTP_HOST }}
       SMTP_PORT:           ${{ secrets.SMTP_PORT }}
       SMTP_USER:           ${{ secrets.SMTP_USER }}
