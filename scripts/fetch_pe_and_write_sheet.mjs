@@ -592,7 +592,6 @@ const CATEGORY_RULES = {
 async function writeStockBlock(startRow, cfg) {
   const { sheetTitle, sheetId } = await ensureToday();
   const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category } = cfg;
-  const priceFormula = cfg.priceFormula ?? priceFormulaFromTicker(ticker);
 
   const rule = CATEGORY_RULES[category];
   if(!rule) throw new Error(`未知类别: ${category}`);
@@ -603,8 +602,7 @@ async function writeStockBlock(startRow, cfg) {
     }
   }
 
-  const E8 = 100000000; // 转“亿”的系数
-  // 行位次映射（方便公式内引用）
+  const E8 = 100000000;
   const r = {
     title:         startRow,
     price:         startRow + 1,
@@ -626,7 +624,7 @@ async function writeStockBlock(startRow, cfg) {
 
   const rows = [
     ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
-    ["价格", priceFormula, "Formula", "实时价格", "Google Finance"],
+    ["价格", "", "数值", "实时价格", "API"],   // ← 价格先占位
     ["总市值", `=(B${r.price}*B${r.shares})`, "Formula", "价格 × 总股本", "—"],
     ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
     ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
@@ -641,9 +639,13 @@ async function writeStockBlock(startRow, cfg) {
     ["利润增速", growthRate, "Fixed", "用于“成长/价值股”的未来利润", "—"],
     ["判定", `=IF(ISNUMBER(B${r.mc}), IF(B${r.mc} <= B${r.buy}, "🟢 低估", IF(B${r.mc} >= B${r.sell}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
   ];
+
+  // ★ 价格：写数值，不用公式
+  const priceVal = await fetchPrice(ticker);
+  rows[1][1] = Number.isFinite(priceVal) ? priceVal : "";
+
   await write(`'${sheetTitle}'!A${startRow}:E${startRow + rows.length - 1}`, rows);
 
-  // 样式（DRY_SHEET 时跳过）
   if (!DRY_SHEET) {
     const requests = [];
     // Header + 边框
@@ -651,19 +653,19 @@ async function writeStockBlock(startRow, cfg) {
     requests.push({ updateBorders: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
     // 数值按“亿”
     const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
-    billionRows.forEach(rIdx => { requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } }); });
+    for (const rIdx of billionRows) {
+      requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+    }
     // 总股本（亿，2位小数）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    // 价格：用脚本抓取的数值，替代谷歌/新浪公式
-const priceVal = await fetchPrice(ticker);
-const priceCell = Number.isFinite(priceVal) ? priceVal : "";
-rows[1] = ["价格", priceCell, "数值", "实时价格", priceVal!=null ? "API" : "—"];
+    // 价格（两位小数）
+    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
+    // 合理PE（整数）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
     // 增速（%）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
     // 折扣率（%）
     requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
   }
 
