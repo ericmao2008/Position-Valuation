@@ -174,24 +174,22 @@ function todayStr(){
 function numOr(v,d){ if(v==null) return d; const s=String(v).trim(); if(!s) return d; const n=Number(s); return Number.isFinite(n)? n : d; }
 
 /* =========================
-   股票价格获取（替代 Google Sheet 内公式）
-   规则：
-   - 上交所/深交所（SHA/SHE）→ 新浪接口
-   - 其它（HKG/NASDAQ/NYSE/...）→ Google Finance
+   股票价格获取（A股=新浪数值，其它=GoogleFinance公式）
    ========================= */
 
 // 拆分交易所/代码
-function splitTicker(ticker){
-  const [ex, code] = String(ticker||"").split(":");
+function splitTicker(ticker) {
+  const [ex, code] = String(ticker || "").split(":");
   return { ex, code };
 }
 
-// 将 A 股 Ticker 转新浪代码：SHA:600519 -> sh600519；SHE:002027 -> sz002027
+// 将 A 股 Ticker 转新浪代码：
+// SHA:600519 -> sh600519；SHE:002027 -> sz002027
 function toSinaCode(ticker) {
   const { ex, code } = splitTicker(ticker);
   if (!ex || !code) return null;
-  if (ex === 'SHA') return 'sh' + code;
-  if (ex === 'SHE') return 'sz' + code;
+  if (ex === "SHA") return "sh" + code;
+  if (ex === "SHE") return "sz" + code;
   return null;
 }
 
@@ -200,7 +198,7 @@ async function fetchSinaPrice(sinaCode) {
   if (!sinaCode) return null;
   const url = `http://hq.sinajs.cn/list=${sinaCode}`;
   try {
-    const r = await fetch(url, { headers: { "Referer": "https://finance.sina.com.cn" } });
+    const r = await fetch(url, { headers: { Referer: "https://finance.sina.com.cn" } });
     const txt = await r.text(); // var hq_str_sh600519="贵州茅台,1712.000,1711.000,1706.000,...";
     const m = txt.match(/"([^"]+)"/);
     if (m && m[1]) {
@@ -214,43 +212,27 @@ async function fetchSinaPrice(sinaCode) {
   return null;
 }
 
-// 抓取 Google Finance（HKG/US 等）
-async function fetchGooglePrice(ticker) {
-  // 例：HKG:0700 -> https://www.google.com/finance/quote/HKG:0700
-  const url = `https://www.google.com/finance/quote/${ticker.replace(':',':')}`;
-  try {
-    const r = await fetch(url, { headers: { "User-Agent": UA } });
-    const html = await r.text();
-    // 简单解析 "price":{"raw":122.34}
-    const m = html.match(/"price"\s*:\s*\{\s*"raw"\s*:\s*([\d.]+)/i);
-    if (m) {
-      const price = parseFloat(m[1]);
-      if (Number.isFinite(price) && price > 0) return price;
-    }
-  } catch (e) {
-    console.error("[GooglePrice error]", ticker, e?.message || e);
-  }
-  return null;
-}
-
-// 统一对外：A 股 → 新浪；其它 → Google
-async function fetchPrice(ticker) {
-  // 可选的环境变量兜底：PRICE_OVERRIDE_SHA_600519 / PRICE_OVERRIDE_HKG_0700 等
-  const envKey = `PRICE_OVERRIDE_${ticker.replace(/[:.]/g,'_')}`;
-  const envVal = process.env[envKey];
-  if (envVal && Number.isFinite(Number(envVal))) return Number(envVal);
-
+/**
+ * 统一对外：返回用于写入 Sheet 的单元格数据
+ * - A 股：写“数值”(API)
+ * - 非 A 股：写“=GOOGLEFINANCE("<ticker>","price")”（Formula）
+ */
+async function fetchPriceCell(ticker) {
   const { ex } = splitTicker(ticker);
 
-  if (ex === 'SHA' || ex === 'SHE') {
+  // A 股 → 新浪接口，直接写数值
+  if (ex === "SHA" || ex === "SHE") {
     const sinaCode = toSinaCode(ticker);
     const p = await fetchSinaPrice(sinaCode);
-    if (p != null) return p;
-    return null; // A股不再兜底 Google，避免混淆
+    return { value: Number.isFinite(p) ? p : "", type: "数值", source: "API" };
   }
 
-  // 非 A 股：用 Google Finance
-  return await fetchGooglePrice(ticker);
+  // 非 A 股 → GoogleFinance 公式
+  return {
+    value: `=GOOGLEFINANCE("${ticker}","price")`,
+    type: "Formula",
+    source: "GoogleFinance",
+  };
 }
 
 /* =========================
@@ -694,13 +676,13 @@ const STOCKS = [
   },
 ];
 
-// 2) 根据 ticker 生成价格公式（可通过 cfg.priceFormula 覆盖）
+// 2) 保留：按交易所拼接 Google Finance 的价格公式（仅作为回退显示用途，不再直接使用）
 function priceFormulaFromTicker(ticker){
   const [ex, code] = String(ticker||"").split(":");
   if(!ex || !code) return "";
-  if(ex === "SHA") return `=getSinaPrice("sh${code}")`;                   // 上交所
-  if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;        // 深交所
-  return `=GOOGLEFINANCE("${ex}:${code}","price")`;                        // 其余交易所（HKG/NYSE/NASDAQ…）
+  if(ex === "SHA") return `=getSinaPrice("sh${code}")`;                 // 上交所（已不用，保留以防将来切换）
+  if(ex === "SHE") return `=GOOGLEFINANCE("SHE:${code}","price")`;      // 深交所（已不用，保留）
+  return `=GOOGLEFINANCE("${ex}:${code}","price")`;                      // 其余交易所（HKG/NYSE/NASDAQ…）
 }
 
 // 3) 类别→估值/买卖点规则
@@ -725,7 +707,7 @@ const CATEGORY_RULES = {
   }),
 };
 
-// 4) 个股写块
+// 4) 个股写块（价格=fetchPriceCell：A股数值、非A股=GoogleFinance公式）
 async function writeStockBlock(startRow, cfg) {
   const { sheetTitle, sheetId } = await ensureToday();
   const { label, ticker, totalShares, fairPE, currentProfit, averageProfit, growthRate, category } = cfg;
@@ -759,9 +741,12 @@ async function writeStockBlock(startRow, cfg) {
   };
   const f = rule(r);
 
+  // ★ 获取价格单元格：A股=数值，其它=GoogleFinance 公式
+  const priceCell = await fetchPriceCell(ticker);
+
   const rows = [
     ["个股", label, "Formula", "个股估值分块", `=HYPERLINK("https://www.google.com/finance/quote/${ticker}", "Google Finance")`],
-    ["价格", "", "数值", "实时价格", "API"],   // ← 价格先占位
+    ["价格", priceCell.value, priceCell.type, "实时价格", priceCell.source], // ← 新价格行
     ["总市值", `=(B${r.price}*B${r.shares})`, "Formula", "价格 × 总股本", "—"],
     ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
     ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
@@ -777,33 +762,94 @@ async function writeStockBlock(startRow, cfg) {
     ["判定", `=IF(ISNUMBER(B${r.mc}), IF(B${r.mc} <= B${r.buy}, "🟢 低估", IF(B${r.mc} >= B${r.sell}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
   ];
 
-  // ★ 价格：写数值，不用公式
-  const priceVal = await fetchPrice(ticker);
-  rows[1][1] = Number.isFinite(priceVal) ? priceVal : "";
-
+  // 写入行
   await write(`'${sheetTitle}'!A${startRow}:E${startRow + rows.length - 1}`, rows);
 
+  // 样式&格式（DRY_SHEET 时跳过）
   if (!DRY_SHEET) {
     const requests = [];
+
     // Header + 边框
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 }, cell: { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } }, fields: "userEnteredFormat(backgroundColor,textFormat)" } });
-    requests.push({ updateBorders: { range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 }, top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }, right: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } } } });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow, startColumnIndex: 0, endColumnIndex: 5 },
+        cell:  { userEnteredFormat: { backgroundColor: { red: 0.95, green: 0.95, blue: 0.95 }, textFormat: { bold: true } } },
+        fields:"userEnteredFormat(backgroundColor,textFormat)"
+      }
+    });
+    requests.push({
+      updateBorders: {
+        range: { sheetId, startRowIndex:(startRow - 1), endRowIndex: startRow + rows.length - 1, startColumnIndex: 0, endColumnIndex: 5 },
+        top: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+        bottom: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+        left: { style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } },
+        right:{ style: "SOLID", width: 1, color: { red: 0.8, green: 0.8, blue: 0.8 } }
+      }
+    });
+
     // 数值按“亿”
     const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
     for (const rIdx of billionRows) {
-      requests.push({ repeatCell: { range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex:rIdx, endRowIndex:rIdx+1, startColumnIndex:1, endColumnIndex:2 },
+          cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0"亿"` } } },
+          fields:"userEnteredFormat.numberFormat"
+        }
+      });
     }
+
     // 总股本（亿，2位小数）
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } }, fields: "userEnteredFormat.numberFormat" } });
-    // 价格（两位小数）
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } }, fields: "userEnteredFormat.numberFormat" } });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r.shares-1, endRowIndex:r.shares, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00"亿"` } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+
+    // 价格（仅当数值时才设置两位小数；公式不做数值格式）
+    if (priceCell.type === "数值") {
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex:r.price-1, endRowIndex:r.price, startColumnIndex:1, endColumnIndex:2 },
+          cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0.00` } } },
+          fields:"userEnteredFormat.numberFormat"
+        }
+      });
+    }
+
     // 合理PE（整数）
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } }, fields: "userEnteredFormat.numberFormat" } });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r.fairPE-1, endRowIndex:r.fairPE, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: `#,##0` } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+
     // 增速（%）
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r.growth-1, endRowIndex:r.growth, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+
     // 折扣率（%）
-    requests.push({ repeatCell: { range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 }, cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } }, fields: "userEnteredFormat.numberFormat" } });
-    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SPREADSHEET_ID, requestBody: { requests } });
+    requests.push({
+      repeatCell: {
+        range: { sheetId, startRowIndex:r.discount-1, endRowIndex:r.discount, startColumnIndex:1, endColumnIndex:2 },
+        cell:  { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.00%" } } },
+        fields:"userEnteredFormat.numberFormat"
+      }
+    });
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { requests }
+    });
   }
 
   return {
