@@ -236,8 +236,13 @@ async function fetchPriceCell(ticker) {
 }
 
 /* =========================
-   Notion 工具函数（极简同步：当天覆盖 + Summary 只挂今天）
+   Notion 工具函数（当天覆盖 + Summary 只挂今天）
    ========================= */
+
+// DB 已有字段集合 & Summary 实际字段名（自动探测）
+let DB_PROPS = new Set();
+let PROP_SUMMARY_NAME = "Summary";  // 会在 notionSelfTest 里校正为数据库里的真实名字
+
 async function notionSelfTest(){
   if (DRY_NOTION) return console.log("[DRY_NOTION] skip selfTest");
   if (!NOTION_DB_ASSETS) {
@@ -246,14 +251,22 @@ async function notionSelfTest(){
   }
   try {
     const db = await notion.databases.retrieve({ database_id: NOTION_DB_ASSETS });
+    const props = Object.keys(db.properties || {});
+    DB_PROPS = new Set(props);
+
+    // 自动识别 Summary 的真实列名（防止你 DB 里改了大小写/命名）
+    const match = props.find(n => n.toLowerCase() === "summary");
+    if (match) PROP_SUMMARY_NAME = match;
+
     console.log("[Notion] DB title:", db?.title?.[0]?.plain_text || "(no title)");
-    DB_PROPS = new Set(Object.keys(db.properties || {}));
-    console.log("[Notion] Props:", ...DB_PROPS);
-    if (!DB_PROPS.has(PROP_SIMPLE.Name) || !DB_PROPS.has(PROP_SIMPLE.Date)) {
-      console.warn("[Notion] 提示：数据库里需要有 Name(title) 和 Date(date) 字段。");
+    console.log("[Notion] Props:", ...props);
+    console.log("[Notion] Summary prop name (auto-detected):", PROP_SUMMARY_NAME);
+
+    if (!DB_PROPS.has("Name") || !DB_PROPS.has("Date")) {
+      console.warn("[Notion] 提示：数据库需有 Name(title) 和 Date(date) 字段。");
     }
-    if (!DB_PROPS.has(PROP_SIMPLE.Summary)) {
-      console.warn("[Notion] 提示：未检测到 Summary(relation) 字段，今天的链接将不会建立。");
+    if (!DB_PROPS.has(PROP_SUMMARY_NAME)) {
+      console.warn(`[Notion] 提示：未检测到 ${PROP_SUMMARY_NAME}(relation) 字段，今天的链接将不会建立。`);
     }
     if (!NOTION_SUMMARY_PAGE_ID) {
       console.warn("[Notion] NOTION_SUMMARY_PAGE_ID 为空：今天的 Summary 不会挂。");
@@ -263,21 +276,22 @@ async function notionSelfTest(){
   }
 }
 
-/* ===== 清理同名资产“历史 Summary” =====
- * 把“同名”的所有历史记录 Summary 关系清空，确保 Dashboard 只显示今天这一条
+/**
+ * 清理同名资产的“历史 Summary”
+ * 让 Dashboard 只显示今天这一条
  */
 async function clearOldSummaryLinks(assetName) {
   if (!NOTION_DB_ASSETS) return;
-  if (!DB_PROPS.has(PROP_SIMPLE.Summary)) return;
+  if (!DB_PROPS.has(PROP_SUMMARY_NAME)) return;
   try {
     const r = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
-      filter: { property: PROP_SIMPLE.Name, title: { equals: assetName } }
+      filter: { property: "Name", title: { equals: assetName } }
     });
     for (const page of r.results || []) {
       await notion.pages.update({
         page_id: page.id,
-        properties: { [PROP_SIMPLE.Summary]: { relation: [] } }  // 清空 relation
+        properties: { [PROP_SUMMARY_NAME]: { relation: [] } }
       });
     }
   } catch (e) {
@@ -285,27 +299,28 @@ async function clearOldSummaryLinks(assetName) {
   }
 }
 
-/* ===== 同名 + 同日 去重（归档旧的，只保留 1 条） =====
- * - Notion API 对“删除”是归档（archived:true）
- * - 先按 last_edited_time 降序取回；保留第 1 条，其余归档
- * - 返回“保留”的 pageId（只有 1 条/无记录时也返回那条或 undefined）
+/**
+ * 同名 + 同日 去重：只保留最近一条，其余归档(archived:true)
+ * 返回“保留”的 pageId
  */
 async function dedupeSameDay(name, dateISO) {
   if (!NOTION_DB_ASSETS || !dateISO) return;
   try {
     const res = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
-      filter: { and: [
-        { property: PROP_SIMPLE.Name, title: { equals: name } },
-        { property: PROP_SIMPLE.Date,  date:  { equals: dateISO } }
-      ]},
+      filter: {
+        and: [
+          { property: "Name", title: { equals: name } },
+          { property: "Date", date: { equals: dateISO } }
+        ]
+      },
       sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
     });
 
     const pages = res.results || [];
     if (pages.length <= 1) return pages[0]?.id;
 
-    const keep = pages[0].id; // 保留最新的一条
+    const keep = pages[0].id; // 保留最新
     for (let i = 1; i < pages.length; i++) {
       await notion.pages.update({ page_id: pages[i].id, archived: true });
       console.log("[Notion] archive duplicate", name, pages[i].id);
@@ -316,110 +331,52 @@ async function dedupeSameDay(name, dateISO) {
   }
 }
 
-/* ===== Upsert（Name + Date 唯一）=====
- * - 写入前：先做“当日去重”(归档旧的) + 清理同名历史 Summary
- * - 当天记录：仅今天这一条挂 Summary（需 DB 有同名 relation 字段 & 传 summaryId）
- * - 若存在“同名+当天”记录：update；否则 create
- * - 可写入 Sort 固定排序
- */
-async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
-  if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
-  if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
-
-  try {
-    // 1) 先把“同名 + 当天”的旧项归档，只保留 1 条
-    await dedupeSameDay(name, dateISO);
-
-    // 2) 再把“同名”的历史 Summary 清空，保证 Dashboard 只显示今天
-    await clearOldSummaryLinks(name);
-
-    // 3) 查询是否已有“同名 + 当天”记录（去重后这里最多 1 条）
-    const q = await notion.databases.query({
-      database_id: NOTION_DB_ASSETS,
-      filter: {
-        and: [
-          { property: PROP_SIMPLE.Name, title: { equals: name } },
-          ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
-        ]
-      },
-      sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
-    });
-    let pageId = q.results?.[0]?.id;
-
-    // 4) 组装 props（仅写存在的字段；避免字段在 DB 里不存在时报错）
-    const props = {};
-    if (DB_PROPS.has(PROP_SIMPLE.Name))      props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
-    if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
-    if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:    { name: assetType } };
-    if (DB_PROPS.has(PROP_SIMPLE.Category))  props[PROP_SIMPLE.Category]  = { select:    { name: category } };
-    if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date: { start: dateISO } };
-    if (DB_PROPS.has(PROP_SIMPLE.Sort))      props[PROP_SIMPLE.Sort]      = { number: sort };
-
-    // 只给“当天这一条”挂 Summary
-    if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
-      props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
-    }
-
-    // 5) 当天存在 → update；否则 create
-    if (pageId) {
-      await notion.pages.update({ page_id: pageId, properties: props });
-      console.log("[Notion] update", name);
-    } else {
-      await notion.pages.create({ parent: { database_id: NOTION_DB_ASSETS }, properties: props });
-      console.log("[Notion] insert", name);
-    }
-
-    // 6) 再兜底做一次“同日去重”（防止竞态）
-    await dedupeSameDay(name, dateISO);
-
-  } catch (e) {
-    console.error("[Notion] upsert error:", e?.message || e);
-  }
-}
-
 /**
  * Upsert（Name+Date 唯一）：
- * - “覆盖更新”策略：同名+当天存在 → update；否则 create（不会重复新增）
- * - 在写入前清空同名资产历史 Summary（确保 Dashboard 只显示今天）
- * - 仅给“今天这条”挂 Summary（NOTION_SUMMARY_PAGE_ID）
- * - 最后做一次“同日去重”兜底
+ * - 先做“同日去重”(归档旧的) + 清历史 Summary
+ * - 只给“今天这一条”挂 Summary（需 DB 有 relation 字段、传了 summaryId）
+ * - 若存在“同名+当天”记录：update；否则 create
+ * - 最后再兜底一次“同日去重”
  */
 async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
   if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
   if (!NOTION_DB_ASSETS) { console.error("[Notion] 缺少 NOTION_DB_ASSETS"); return; }
 
   try {
-    // 1) 查“同名 + 当天”
+    // 1) 当日去重 → 只留一条
+    await dedupeSameDay(name, dateISO);
+
+    // 2) 清历史 Summary（确保 Dashboard 只显示今天）
+    await clearOldSummaryLinks(name);
+
+    // 3) 查“同名 + 当天”
     const q = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
       filter: {
         and: [
-          { property: PROP_SIMPLE.Name, title: { equals: name } },
-          ...(dateISO ? [{ property: PROP_SIMPLE.Date, date: { equals: dateISO } }] : [])
+          { property: "Name", title: { equals: name } },
+          ...(dateISO ? [{ property: "Date", date: { equals: dateISO } }] : [])
         ]
       },
       sorts: [{ timestamp: "last_edited_time", direction: "descending" }]
     });
     let pageId = q.results?.[0]?.id;
 
-    // 2) 清理历史 Summary（保证 Dashboard 只显示当天）
-    await clearOldSummaryLinks(name);
-
-    // 3) props（只写存在的字段）
+    // 4) 组装 props（只写 DB 里存在的字段，避免报错）
     const props = {};
-    if (DB_PROPS.has(PROP_SIMPLE.Name))      props[PROP_SIMPLE.Name]      = { title:     [{ text: { content: name } }] };
-    if (DB_PROPS.has(PROP_SIMPLE.Valuation)) props[PROP_SIMPLE.Valuation] = { rich_text: [{ text: { content: valuation } }] };
-    if (DB_PROPS.has(PROP_SIMPLE.AssetType)) props[PROP_SIMPLE.AssetType] = { select:    { name: assetType } };
-    if (DB_PROPS.has(PROP_SIMPLE.Category))  props[PROP_SIMPLE.Category]  = { select:    { name: category } };
-    if (DB_PROPS.has(PROP_SIMPLE.Date) && dateISO) props[PROP_SIMPLE.Date] = { date: { start: dateISO } };
-    if (DB_PROPS.has(PROP_SIMPLE.Sort))      props[PROP_SIMPLE.Sort]      = { number: sort };
+    if (DB_PROPS.has("Name"))      props["Name"]      = { title:     [{ text: { content: name } }] };
+    if (DB_PROPS.has("Valuation")) props["Valuation"] = { rich_text: [{ text: { content: valuation } }] };
+    if (DB_PROPS.has("AssetType")) props["AssetType"] = { select:    { name: assetType } };
+    if (DB_PROPS.has("Category"))  props["Category"]  = { select:    { name: category } };
+    if (DB_PROPS.has("Date") && dateISO) props["Date"] = { date: { start: dateISO } };
+    if (DB_PROPS.has("Sort"))      props["Sort"]      = { number: sort };
 
-    // 只给“今天这条”挂 Summary（保证 Dashboard 只显示今天）
-    if (DB_PROPS.has(PROP_SIMPLE.Summary) && summaryId) {
-      props[PROP_SIMPLE.Summary] = { relation: [{ id: summaryId }] };
+    // 只给“今天这一条”挂 Summary
+    if (DB_PROPS.has(PROP_SUMMARY_NAME) && summaryId) {
+      props[PROP_SUMMARY_NAME] = { relation: [{ id: summaryId }] };
     }
 
-    // 4) 覆盖更新 / 新建
+    // 5) 覆盖更新 / 新建
     if (pageId) {
       await notion.pages.update({ page_id: pageId, properties: props });
       console.log("[Notion] update", name);
@@ -428,7 +385,7 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
       console.log("[Notion] insert", name);
     }
 
-    // 5) 一次兜底：同名同日多条 → 只保留最近的一条
+    // 6) 兜底再去重一次
     await dedupeSameDay(name, dateISO);
 
   } catch (e) {
