@@ -904,6 +904,7 @@ async function runDaily(){
    也兼容命令行 --mode=xxx）
    ========================= */
 
+// 既支持 Actions 注入的 MODE，也支持命令行 --mode=test-vc
 const _MODE =
   process.env.MODE ||
   ((process.argv.slice(2).find(a => a.startsWith('--mode=')) || '').split('=')[1]) ||
