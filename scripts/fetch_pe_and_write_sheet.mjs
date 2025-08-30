@@ -966,7 +966,10 @@ async function testSheet(){
   await write(`'${sheetTitle}'!A1:E1`, [['仅测试写入']]);
   console.log('[TEST:SHEET] done');
 }
-async function testMail(){ await sendEmailIfEnabled(['这是一封测试邮件', '第二行']); console.log('[TEST:MAIL] done'); }
+async function testMail(){
+  await sendEmailIfEnabled(['这是一封测试邮件', '第二行'], '(test)', 0);
+  console.log('[TEST:MAIL] done');
+}
 
 /* =========================
    主流程：整条流水线
@@ -1196,7 +1199,7 @@ async function runDaily(){
   }
 
   // ====== 邮件 ======
-  await sendEmailIfEnabled(lines);
+  await sendEmailIfEnabled(lines, sheetTitle, sheetId);
 }
 
 /* =========================
