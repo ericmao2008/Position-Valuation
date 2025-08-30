@@ -881,21 +881,48 @@ async function writeStockBlock(startRow, cfg) {
 /* =========================
    邮件（保持与你现有逻辑一致）
    ========================= */
-async function sendEmailIfEnabled(lines){
+async function sendEmailIfEnabled(lines, sheetTitle, sheetId){
   if (DRY_MAIL) { console.log("[DRY_MAIL]", lines); return; }
+
   const { SMTP_HOST,SMTP_PORT,SMTP_USER,SMTP_PASS,MAIL_TO,MAIL_FROM_NAME,MAIL_FROM_EMAIL,FORCE_EMAIL } = process.env;
   if(!SMTP_HOST||!SMTP_PORT||!SMTP_USER||!SMTP_PASS||!MAIL_TO){ dbg("[MAIL] skip env"); return; }
-  const transporter = nodemailer.createTransport({ host:SMTP_HOST, port:Number(SMTP_PORT)===465?465:Number(SMTP_PORT), secure:Number(SMTP_PORT)===465, auth:{ user:SMTP_USER, pass:SMTP_PASS }});
-  try{ dbg("[MAIL] verify start",{host:SMTP_HOST,user:SMTP_USER,to:MAIL_TO}); await transporter.verify(); dbg("[MAIL] verify ok"); }
-  catch(e){ console.error("[MAIL] verify fail:",e); if(!FORCE_EMAIL) return; console.error("[MAIL] FORCE_EMAIL=1, continue"); }
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT)===465 ? 465 : Number(SMTP_PORT),
+    secure: Number(SMTP_PORT)===465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+
   const fromEmail = MAIL_FROM_EMAIL || SMTP_USER;
   const from = MAIL_FROM_NAME ? `${MAIL_FROM_NAME} <${fromEmail}>` : fromEmail;
   const subject = `Valuation Daily — ${todayStr()} (${TZ})`;
-  const text = [`Valuation Daily — ${todayStr()} (${TZ})`, ...lines.map(s=>`• ${s}`), ``, `See sheet "${todayStr()}" for thresholds & judgments.`].join('\n');
-  const html = [`<h3>Valuation Daily — ${todayStr()} (${TZ})`, `<ul>${lines.map(s=>`<li>${s}</li>`).join("")}</ul>`, `<p>See sheet "${todayStr()}" for thresholds & judgments.</p>`].join("");
-  dbg("[MAIL] send start",{subject,to:MAIL_TO,from});
-  try{ const info = await transporter.sendMail({ from, to:MAIL_TO, subject, text, html }); console.log("[MAIL] sent",{ messageId: info.messageId, response: info.response }); }
-  catch(e){ console.error("[MAIL] send error:", e); }
+
+  // Google Sheet 的本页链接
+  const sheetUrl = (sheetId!=null)
+    ? `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit#gid=${sheetId}`
+    : `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/edit`;
+
+  const text = [
+    `Valuation Daily — ${todayStr()} (${TZ})`,
+    ...lines.map(s=>`• ${s}`),
+    ``,
+    `See sheet "${sheetTitle || todayStr()}" at: ${sheetUrl}`
+  ].join('\n');
+
+  const html = [
+    `<h3>Valuation Daily — ${todayStr()} (${TZ})</h3>`,
+    `<ul>${lines.map(s=>`<li>${s}</li>`).join("")}</ul>`,
+    `<p>See sheet "<a href="${sheetUrl}">${sheetTitle || todayStr()}</a>" for thresholds & judgments.</p>`
+  ].join("");
+
+  try{
+    dbg("[MAIL] send start",{subject,to:MAIL_TO,from});
+    const info = await transporter.sendMail({ from, to: MAIL_TO, subject, text, html });
+    console.log("[MAIL] sent",{ messageId: info.messageId, response: info.response });
+  }catch(e){
+    console.error("[MAIL] send error:", e);
+  }
 }
 
 /* =========================
