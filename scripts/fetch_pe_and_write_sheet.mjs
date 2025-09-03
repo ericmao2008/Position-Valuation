@@ -1,8 +1,13 @@
 /**
  * Version History
+ * V6.1.0 - 修复日经指数PE/PB抓取问题 + 新增test-nikkei测试模式
+ * - 新增fetchNikkei()函数，使用Playwright直接抓取日经指数数据
+ * - 支持多个数据源：日经官网 + Investing.com备用
+ * - 新增 --mode=test-nikkei 测试日经指数抓取
+ * 
  * V6.0.0 - 单文件模块化 + 子命令 + DRY 开关 + Notion极简同步(+Summary)
  * - 支持 --mode=test-vc/test-nifty/test-notion/test-sheet/test-mail 仅跑某模块
- * - DRY_SHEET/DRY_NOTION/DRY_MAIL 开关，开发期“看结果不落地”
+ * - DRY_SHEET/DRY_NOTION/DRY_MAIL 开关，开发期"看结果不落地"
  * - Notion 极简同步：Name / Valuation / AssetType / Category / Date / Summary(可选)
  * - 其它估值、写表、邮件逻辑延续现有版本
  */
@@ -213,8 +218,8 @@ async function fetchSinaPrice(sinaCode) {
 
 /**
  * 统一对外：返回用于写入 Sheet 的单元格数据
- * - A 股：写“数值”(API)
- * - 非 A 股：写“=GOOGLEFINANCE("<ticker>","price")”（Formula）
+ * - A 股：写"数值"(API)
+ * - 非 A 股：写"=GOOGLEFINANCE("<ticker>","price")"（Formula）
  */
 async function fetchPriceCell(ticker) {
   const { ex } = splitTicker(ticker);
@@ -276,7 +281,7 @@ async function notionSelfTest(){
 }
 
 /**
- * 清理同名资产的“历史 Summary”
+ * 清理同名资产的"历史 Summary"
  * 让 Dashboard 只显示今天这一条
  */
 async function clearOldSummaryLinks(assetName) {
@@ -300,7 +305,7 @@ async function clearOldSummaryLinks(assetName) {
 
 /**
  * 同名 + 同日 去重：只保留最近一条，其余归档(archived:true)
- * 返回“保留”的 pageId
+ * 返回"保留"的 pageId
  */
 async function dedupeSameDay(name, dateISO) {
   if (!NOTION_DB_ASSETS || !dateISO) return;
@@ -332,10 +337,10 @@ async function dedupeSameDay(name, dateISO) {
 
 /**
  * Upsert（Name+Date 唯一）：
- * - 先做“同日去重”(归档旧的) + 清历史 Summary
- * - 只给“今天这一条”挂 Summary（需 DB 有 relation 字段、传了 summaryId）
- * - 若存在“同名+当天”记录：update；否则 create
- * - 最后再兜底一次“同日去重”
+ * - 先做"同日去重"（归档旧的） + 清历史 Summary
+ * - 只给"今天这一条"挂 Summary（需 DB 有 relation 字段、传了 summaryId）
+ * - 若存在"同名+当天"记录：update；否则 create
+ * - 最后再兜底一次"同日去重"
  */
 async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, summaryId, sort=0 }) {
   if (DRY_NOTION) return console.log("[DRY_NOTION upsert]", { name, valuation, assetType, category, dateISO, sort });
@@ -348,7 +353,7 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
     // 2) 清历史 Summary（确保 Dashboard 只显示今天）
     await clearOldSummaryLinks(name);
 
-    // 3) 查“同名 + 当天”
+    // 3) 查"同名 + 当天"
     const q = await notion.databases.query({
       database_id: NOTION_DB_ASSETS,
       filter: {
@@ -370,7 +375,7 @@ async function upsertSimpleRow({ name, valuation, assetType, category, dateISO, 
     if (DB_PROPS.has("Date") && dateISO) props["Date"] = { date: { start: dateISO } };
     if (DB_PROPS.has("Sort"))      props["Sort"]      = { number: sort };
 
-    // 只给“今天这一条”挂 Summary
+    // 只给"今天这一条"挂 Summary
     if (DB_PROPS.has(PROP_SUMMARY_NAME) && summaryId) {
       props[PROP_SUMMARY_NAME] = { relation: [{ id: summaryId }] };
     }
@@ -469,6 +474,170 @@ async function fetchNifty50(){
     });
     return { pe: values.pe, pb: values.pb, link: `=HYPERLINK("${url}","Nifty")` };
   } finally { await br.close(); }
+}
+
+// 新增：抓取日经指数PE和PB值
+async function fetchNikkei(){
+  console.log("[NIKKEI] 开始抓取日经指数数据...");
+  
+  try {
+    const { chromium } = await import("playwright");
+    console.log("[NIKKEI] Playwright导入成功");
+    
+    const br  = await chromium.launch({ 
+      headless: true, 
+      args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox'] 
+    });
+    console.log("[NIKKEI] 浏览器启动成功");
+    
+    const ctx = await br.newContext({ 
+      userAgent: UA, 
+      locale: 'en-US', 
+      timezoneId: TZ 
+    });
+    const pg  = await ctx.newPage();
+    console.log("[NIKKEI] 页面创建成功");
+    
+    // 尝试多个数据源
+    let pe = null, pb = null;
+    
+    // 方法1: 从日经官网抓取
+    try {
+      console.log("[NIKKEI] 尝试从日经官网抓取PE数据...");
+      await pg.goto("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", { waitUntil: 'networkidle', timeout: 15000 });
+      await pg.waitForTimeout(2000);
+      
+      const peValue = await pg.evaluate(() => {
+        const table = document.querySelector('table');
+        if (table) {
+          const rows = Array.from(table.querySelectorAll('tr'));
+          // 查找包含最新数据的行（通常是最后几行）
+          for (let i = rows.length - 1; i >= 0; i--) {
+            const cells = rows[i].querySelectorAll('td');
+            if (cells.length >= 3) {
+              const value = cells[2]?.textContent?.trim();
+              if (value && !isNaN(parseFloat(value))) {
+                return parseFloat(value);
+              }
+            }
+          }
+        }
+        return null;
+      });
+      
+      if (peValue) {
+        pe = peValue;
+        console.log("[NIKKEI] PE抓取成功:", pe);
+      } else {
+        console.log("[NIKKEI] PE抓取失败: 未找到有效数据");
+      }
+    } catch (e) {
+      console.log("[NIKKEI] PE抓取失败:", e.message);
+    }
+    
+    // 方法2: 从PB页面抓取
+    try {
+      console.log("[NIKKEI] 尝试从日经官网抓取PB数据...");
+      await pg.goto("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", { waitUntil: 'networkidle', timeout: 15000 });
+      await pg.waitForTimeout(2000);
+      
+      const pbValue = await pg.evaluate(() => {
+        const table = document.querySelector('table');
+        if (table) {
+          const rows = Array.from(table.querySelectorAll('tr'));
+          // 查找包含最新数据的行
+          for (let i = rows.length - 1; i >= 0; i--) {
+            const cells = rows[i].querySelectorAll('td');
+            if (cells.length >= 3) {
+              const value = cells[2]?.textContent?.trim();
+              if (value && !isNaN(parseFloat(value))) {
+                return parseFloat(value);
+              }
+            }
+          }
+        }
+        return null;
+      });
+      
+      if (pbValue) {
+        pb = pbValue;
+        console.log("[NIKKEI] PB抓取成功:", pb);
+      } else {
+        console.log("[NIKKEI] PB抓取失败: 未找到有效数据");
+      }
+    } catch (e) {
+      console.log("[NIKKEI] PB抓取失败:", e.message);
+    }
+    
+    // 方法3: 备用数据源 - 从Investing.com抓取
+    if (!pe || !pb) {
+      try {
+        console.log("[NIKKEI] 尝试从Investing.com抓取备用数据...");
+        await pg.goto("https://www.investing.com/indices/japan-ni225", { waitUntil: 'networkidle', timeout: 15000 });
+        await pg.waitForTimeout(2000);
+        
+        const values = await pg.evaluate(() => {
+          let pe = null, pb = null;
+          
+          // 查找PE值
+          const peElements = Array.from(document.querySelectorAll('span, div')).filter(el => 
+            el.textContent?.includes('P/E') || el.textContent?.includes('PE')
+          );
+          for (const el of peElements) {
+            const match = el.textContent?.match(/(\d+\.?\d*)/);
+            if (match) {
+              pe = parseFloat(match[1]);
+              break;
+            }
+          }
+          
+          // 查找PB值
+          const pbElements = Array.from(document.querySelectorAll('span, div')).filter(el => 
+            el.textContent?.includes('P/B') || el.textContent?.includes('PB')
+          );
+          for (const el of pbElements) {
+            const match = el.textContent?.match(/(\d+\.?\d*)/);
+            if (match) {
+              pb = parseFloat(match[1]);
+              break;
+            }
+          }
+          
+          return { pe, pb };
+        });
+        
+        if (values.pe && !pe) {
+          pe = values.pe;
+          console.log("[NIKKEI] 从Investing.com获取PE:", pe);
+        }
+        if (values.pb && !pb) {
+          pb = values.pb;
+          console.log("[NIKKEI] 从Investing.com获取PB:", pb);
+        }
+      } catch (e) {
+        console.log("[NIKKEI] Investing.com抓取失败:", e.message);
+      }
+    }
+    
+    const result = { 
+      pe: pe, 
+      pb: pb, 
+      link: `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")` 
+    };
+    
+    console.log("[NIKKEI] 抓取完成，结果:", result);
+    return result;
+    
+  } catch (error) {
+    console.error("[NIKKEI] 严重错误:", error.message);
+    throw error;
+  } finally { 
+    try {
+      if (typeof br !== 'undefined' && br) await br.close();
+    } catch (e) {
+      console.log("[NIKKEI] 浏览器关闭失败:", e.message);
+    }
+  }
 }
 
 /* =========================
@@ -668,7 +837,7 @@ const STOCKS = [
     totalShares: 9772000000,     // 股数
     fairPE: 25,                   // 合理PE（用于估值&买卖点）
     currentProfit: 220000000000,  // 当年净利（元）
-    averageProfit: null,          // 周期股可填“平均净利”
+    averageProfit: null,          // 周期股可填"平均净利"
     growthRate: 0.12,             // 利润增速（成长/价值股用）
     category: "成长股"            // 成长股 / 价值股 / 周期股
   },
@@ -688,7 +857,7 @@ const STOCKS = [
     totalShares: 13760000000,
     fairPE: 25,
     currentProfit: 0,
-    averageProfit: 4600000000,    // 46亿（周期股使用“平均净利”估值）
+    averageProfit: 4600000000,    // 46亿（周期股使用"平均净利"估值）
     growthRate: 0.00,
     category: "周期股"
   },
@@ -769,14 +938,14 @@ async function writeStockBlock(startRow, cfg) {
     ["总股本", totalShares / E8, "Formula", "单位: 亿股", "用户提供"],
     ["合理PE", fairPE, "Fixed", `基于商业模式和增速的估算`, "—"],
     ["当年净利润", (currentProfit||0) / E8, "Fixed", "年报后需手动更新", "—"],
-    ["平均净利润", (averageProfit!=null? averageProfit/E8 : ""), "Fixed", "仅“类别=周期股”时生效", "—"],
+    ["平均净利润", (averageProfit!=null? averageProfit/E8 : ""), "Fixed", "仅\"类别=周期股\"时生效", "—"],
     ["3年后净利润", `=B${r.currentProfit} * (1+B${r.growth})^3`, "Formula", "当年净利润 * (1+增速)^3", "—"],
     ["合理估值", f.fairVal, "Formula", "由类别规则生成", "—"],
     ["折扣率", `=IFERROR(B${r.mc}/B${r.fairVal},"")`, "Formula", "总市值 ÷ 合理估值", "—"],
     ["买点", f.buy, "Formula", "由类别规则生成", "—"],
     ["卖点", f.sell, "Formula", "由类别规则生成", "—"],
     ["类别", category, "Fixed", "—", "—"],
-    ["利润增速", growthRate, "Fixed", "用于“成长/价值股”的未来利润", "—"],
+    ["利润增速", growthRate, "Fixed", "用于\"成长/价值股\"的未来利润", "—"],
     ["判定", `=IF(ISNUMBER(B${r.mc}), IF(B${r.mc} <= B${r.buy}, "🟢 低估", IF(B${r.mc} >= B${r.sell}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 总市值 与 买卖点", "—"],
   ];
 
@@ -805,7 +974,7 @@ async function writeStockBlock(startRow, cfg) {
       }
     });
 
-    // 数值按“亿”
+    // 数值按"亿"
     const billionRows = [r.mc, r.currentProfit, r.avgProfit, r.futureProfit, r.fairVal, r.buy, r.sell].map(x=>x-1);
     for (const rIdx of billionRows) {
       requests.push({
@@ -951,6 +1120,7 @@ function formatStockLine(label, discountRaw, judgment){
    ========================= */
 async function testVC(){ console.log("[TEST:VC]", await fetchVCMapDOM()); }
 async function testNifty(){ console.log("[TEST:NIFTY]", await fetchNifty50()); }
+async function testNikkei(){ console.log("[TEST:NIKKEI]", await fetchNikkei()); }
 async function testNotion(){
   await notionSelfTest();
   const iso = todayStr();
@@ -1033,13 +1203,33 @@ async function runDaily(){
   row = res_ndx.nextRow;
 }
 
- // Nikkei（公式）
+ // Nikkei（使用fetchNikkei函数抓取真实数据）
 {
   const startRow = row;
 
   // ★ 改用 getRf('JP') / getErp('JP')，不要再用 rf_jp_promise / erp_jp_promise
   const rfRes  = await getRf('JP');   // { v, tag, link }
   const erpRes = await getErp('JP');  // { v, tag, link }
+  
+  // 使用fetchNikkei函数抓取真实PE和PB值（仅在USE_PW模式下）
+  let nikkei = { pe: null, pb: null, link: `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")` };
+  
+  if (USE_PW) {
+    try {
+      nikkei = await fetchNikkei();  // { pe, pb, link }
+      console.log("[NIKKEI] 抓取成功:", { pe: nikkei.pe, pb: nikkei.pb });
+    } catch (e) {
+      console.log("[NIKKEI] 抓取失败，使用兜底数据:", e.message);
+      // 使用兜底数据
+      nikkei = { 
+        pe: null, 
+        pb: null, 
+        link: `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")` 
+      };
+    }
+  } else {
+    console.log("[NIKKEI] USE_PW=false，跳过抓取");
+  }
 
   const peRow      = startRow + 1;
   const pbRow      = startRow + 2;
@@ -1051,19 +1241,19 @@ async function runDaily(){
   const roeRow     = startRow + 10;
 
   const nikkei_rows = [
-    ["指数", "日经指数", "Formula", "宽基/行业指数估值分块", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/","Nikkei")`],
-    ["P/E（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=per","Nikkei PER")`],
-    ["P/B（TTM）", `=IMPORTXML("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr", "/html/body/div[1]/div/main/section/div/div[2]/table/tbody/tr[16]/td[3]")`, "Formula", "估值来源", `=HYPERLINK("https://indexes.nikkei.co.jp/en/nkave/archives/data?list=pbr","Nikkei PBR")`],
+    ["指数", "日经指数", nikkei.pe ? "真实" : "兜底", "宽基/行业指数估值分块", nikkei.link],
+    ["P/E（TTM）", nikkei.pe || "", nikkei.pe ? "真实" : "兜底", "估值来源", nikkei.link],
+    ["P/B（TTM）", nikkei.pb || "", nikkei.pb ? "真实" : "兜底", "估值来源", nikkei.link],
     ["E/P = 1 / P/E", `=IF(ISNUMBER(B${peRow}), 1/B${peRow}, "")`, "Formula", "盈收益率（小数，显示为百分比）", "—"],
     ["无风险利率 r_f（10Y名义）", rfRes.v,  rfRes.tag,  "JP 10Y",     rfRes.link],
     ["目标 ERP*",              erpRes.v, erpRes.tag, "达摩达兰", erpRes.link],
     ["容忍带 δ", DELTA, "真实", "减少频繁切换（说明用，不定义卖点）", "—"],
     // 用 ROE 倍数因子计算买/卖点（与其它指数保持一致）
-    ["买点PE上限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
-    ["卖点PE下限（含ROE因子）", `=1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${roeRow}/${ROE_BASE}`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
+    ["买点PE上限（含ROE因子）", `=IF(ISNUMBER(B${roeRow}), 1/(B${rfRow}+B${erpStarRow}+B${deltaRow})*B${roeRow}/${ROE_BASE}, "")`, "Formula", "买点=1/(r_f+ERP*+δ)×factor", "—"],
+    ["卖点PE下限（含ROE因子）", `=IF(ISNUMBER(B${roeRow}), 1/(B${rfRow}+B${erpStarRow}-B${deltaRow})*B${roeRow}/${ROE_BASE}, "")`, "Formula", "卖点=1/(r_f+ERP−δ)×factor", "—"],
     ["合理PE区间（含ROE因子）", `=IF(AND(ISNUMBER(B${peBuyRow}),ISNUMBER(B${peSellRow})), TEXT(B${peBuyRow},"0.00")&" ~ "&TEXT(B${peSellRow},"0.00"), "")`, "Formula", "买点上限 ~ 卖点下限", "—"],
     ["ROE（TTM）", `=IF(AND(ISNUMBER(B${peRow}),ISNUMBER(B${pbRow})), B${pbRow}/B${peRow}, "")`, "Formula", "盈利能力 = P/B / P/E", "—"],
-    ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "错误")`, "Formula", "基于 P/E 与区间", "—"],
+    ["判定", `=IF(ISNUMBER(B${peRow}), IF(B${peRow} <= B${peBuyRow}, "🟢 低估", IF(B${peRow} >= B${peSellRow}, "🔴 高估", "🟡 持有")), "需手动更新")`, "Formula", "基于 P/E 与区间", "—"],
   ];
 
   const end = startRow + nikkei_rows.length - 1;
@@ -1251,6 +1441,14 @@ console.log('[INFO] MODE =', _MODE);
       console.log('[TEST] 只测试 Nifty 50 抓取');
       const nifty = await fetchNifty50();
       console.log('[TEST:NIFTY]', nifty);
+      return;
+    }
+
+    // 只测试日经指数抓取
+    if (_MODE === 'test-nikkei') {
+      console.log('[TEST] 只测试日经指数抓取');
+      const nikkei = await fetchNikkei();
+      console.log('[TEST:NIKKEI]', nikkei);
       return;
     }
 
