@@ -1,13 +1,9 @@
-name: Daily Valuation (06:00 Brisbane)
+name: Daily Valuation
 
 on:
   schedule:
     - cron: '0 20 * * *'   # 06:00 Brisbane (UTC+10) = 20:00 UTC (previous day)
-  workflow_dispatch: {}
-
-concurrency:
-  group: daily-valuation-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   run:
@@ -15,54 +11,36 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # 工作目录
-      GITHUB_WORKSPACE: ${{ github.workspace }}
-
-      # Google 相关
       GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
       GOOGLE_PRIVATE_KEY:  ${{ secrets.GOOGLE_PRIVATE_KEY }}
       SPREADSHEET_ID:      ${{ vars.SPREADSHEET_ID }}
-
-      # 邮件通知
       SMTP_HOST:           ${{ secrets.SMTP_HOST }}
       SMTP_PORT:           ${{ secrets.SMTP_PORT }}
       SMTP_USER:           ${{ secrets.SMTP_USER }}
       SMTP_PASS:           ${{ secrets.SMTP_PASS }}
       MAIL_TO:             ${{ vars.MAIL_TO }}
       MAIL_FROM_NAME:      ${{ vars.MAIL_FROM_NAME }}
-
-      # 判定参数（可在 Repository Variables 中配置）
       ERP_TARGET:          ${{ vars.ERP_TARGET }}
       DELTA:               ${{ vars.DELTA }}
       TZ:                  Australia/Brisbane
-
-      # 兜底（可选）
       RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}
       RF_US:               ${{ vars.RF_US }}
       PE_OVERRIDE:         ${{ vars.PE_OVERRIDE }}
       PE_OVERRIDE_SPX:     ${{ vars.PE_OVERRIDE_SPX }}
-
-      # Playwright
-      USE_PLAYWRIGHT:      '1'
-      DEBUG_VERBOSE:       '1'
-
-      # —— 腾讯兜底（可选；若留空则不用）——
-      # 单位：TENCENT_MC_OVERRIDE 为"港元"，例：2960000000000 表示 2.96 万亿港元
-      # 单位：TENCENT_SHARES_OVERRIDE 为"股"，例：9570000000
       TENCENT_MC_OVERRIDE:      ${{ vars.TENCENT_MC_OVERRIDE }}
       TENCENT_SHARES_OVERRIDE:  ${{ vars.TENCENT_SHARES_OVERRIDE }}
-
-      # ===== Notion =====
       NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
       NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
       NOTION_SUMMARY_PAGE_ID:  ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
+      USE_PLAYWRIGHT:      '1'
+      DEBUG_VERBOSE:       '1'
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v3
         with:
           node-version: '20'
           cache: 'npm'
@@ -73,7 +51,7 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium --with-deps
 
-      - name: Run fetch & write (with one retry)
+      - name: Run fetch & write
         run: |
           set -e
           echo "Running daily valuation workflow"
@@ -85,7 +63,7 @@ jobs:
 
       - name: Upload Debug Artifacts on Failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: debug-snapshot
           path: |
