@@ -3,7 +3,7 @@ name: Daily Valuation
 on:
   schedule:
     - cron: '0 20 * * *'   # 06:00 Brisbane (UTC+10) = 20:00 UTC (previous day)
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   run:
