@@ -1,10 +1,21 @@
-name: Daily Valuation (09:30 & 16:30 Beijing)
+name: Daily Valuation (06:00 Brisbane)
 
 on:
   schedule:
-    - cron: '30 1 * * *'   # 09:30 CST (UTC+8)
-    - cron: '30 8 * * *'   # 16:30 CST (UTC+8)
-  workflow_dispatch: {}
+    - cron: '0 20 * * *'   # 06:00 Brisbane (UTC+10) = 20:00 UTC (previous day)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式 (full/test-vc/test-sheet/test-notion/test-mail)'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - test-vc
+          - test-sheet
+          - test-notion
+          - test-mail
 
 concurrency:
   group: daily-valuation-${{ github.ref }}
@@ -35,7 +46,7 @@ jobs:
       # 判定参数（可在 Repository Variables 中配置）
       ERP_TARGET:          ${{ vars.ERP_TARGET }}
       DELTA:               ${{ vars.DELTA }}
-      TZ:                  Asia/Shanghai
+      TZ:                  Australia/Brisbane
 
       # 兜底（可选）
       RF_OVERRIDE:         ${{ vars.RF_OVERRIDE }}
@@ -48,8 +59,8 @@ jobs:
       DEBUG_VERBOSE:       '1'
 
       # —— 腾讯兜底（可选；若留空则不用）——
-      # 单位：TENCENT_MC_OVERRIDE 为“港元”，例：2960000000000 表示 2.96 万亿港元
-      # 单位：TENCENT_SHARES_OVERRIDE 为“股”，例：9570000000
+      # 单位：TENCENT_MC_OVERRIDE 为"港元"，例：2960000000000 表示 2.96 万亿港元
+      # 单位：TENCENT_SHARES_OVERRIDE 为"股"，例：9570000000
       TENCENT_MC_OVERRIDE:      ${{ vars.TENCENT_MC_OVERRIDE }}
       TENCENT_SHARES_OVERRIDE:  ${{ vars.TENCENT_SHARES_OVERRIDE }}
 
@@ -57,6 +68,9 @@ jobs:
       NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
       NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
       NOTION_SUMMARY_PAGE_ID:  ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
+
+      # 运行模式
+      MODE:                ${{ github.event.inputs.mode || 'full' }}
 
     steps:
       - name: Checkout
@@ -77,6 +91,7 @@ jobs:
       - name: Run fetch & write (with one retry)
         run: |
           set -e
+          echo "Running with MODE=${MODE}"
           node scripts/fetch_pe_and_write_sheet.mjs || {
             echo "First run failed. Retrying in 10 seconds..."
             sleep 10
