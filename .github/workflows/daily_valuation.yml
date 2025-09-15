@@ -3,19 +3,7 @@ name: Daily Valuation (06:00 Brisbane)
 on:
   schedule:
     - cron: '0 20 * * *'   # 06:00 Brisbane (UTC+10) = 20:00 UTC (previous day)
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: '运行模式 (full/test-vc/test-sheet/test-notion/test-mail)'
-        required: false
-        default: 'full'
-        type: choice
-        options:
-          - full
-          - test-vc
-          - test-sheet
-          - test-notion
-          - test-mail
+  workflow_dispatch: {}
 
 concurrency:
   group: daily-valuation-${{ github.ref }}
@@ -69,9 +57,6 @@ jobs:
       NOTION_DB_ASSETS:    ${{ vars.NOTION_DB_ASSETS }}
       NOTION_SUMMARY_PAGE_ID:  ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
 
-      # 运行模式
-      MODE:                ${{ github.event.inputs.mode || 'full' }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,7 +76,7 @@ jobs:
       - name: Run fetch & write (with one retry)
         run: |
           set -e
-          echo "Running with MODE=${MODE}"
+          echo "Running daily valuation workflow"
           node scripts/fetch_pe_and_write_sheet.mjs || {
             echo "First run failed. Retrying in 10 seconds..."
             sleep 10
